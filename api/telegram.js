@@ -1,6 +1,6 @@
 import { cfg } from './_lib/config.js';
 import { tg, sendMessage, sendLongMessage, answerCallbackQuery, categoryButton } from './_lib/telegram.js';
-import { fetchProducts, purchaseProduct, canAutoPurchase } from './_lib/products.js';
+import { fetchProducts, purchaseProduct, canAutoPurchase, canPurchaseWithInput } from './_lib/products.js';
 import { getRuntimeConfig } from './_lib/runtime-config.js';
 
 const CATEGORIES = [
@@ -283,6 +283,115 @@ async function showCategory(chatId, slug, runtime, page = 1) {
   });
 }
 
+function accountMarker(key, total, index) {
+  return `#REQ:${key}:${total}:${index}`;
+}
+
+function previousAccounts(promptText) {
+  const accounts = [];
+  const re = /✅ الحساب \d+: ([^\n]+)/g;
+  let match;
+  while ((match = re.exec(String(promptText || '')))) accounts.push(match[1].trim());
+  return accounts;
+}
+
+function parseAccountPrompt(promptText) {
+  const match = String(promptText || '').match(/#REQ:([a-f0-9]{12}):([1-3]):([1-3])/i);
+  if (!match) return null;
+  return {
+    key: match[1],
+    total: Number(match[2]),
+    index: Number(match[3]),
+    accounts: previousAccounts(promptText),
+  };
+}
+
+function validCustomerEmail(value) {
+  const email = String(value || '').trim();
+  return email.length >= 5 && email.length <= 90 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+async function askForAccount(chatId, key, total, index, accounts = []) {
+  const previous = accounts.map((email, i) => `✅ الحساب ${i + 1}: ${email}`);
+  const lines = [
+    `📧 الحساب ${index} من ${total}`,
+    '',
+    'أرسل بريد الحساب اللي تبي يتفعل عليه الاشتراك.',
+    'مثال: name@gmail.com',
+    'لا ترسل كلمة المرور — نحتاج البريد فقط.',
+  ];
+  if (previous.length) lines.push('', ...previous);
+  lines.push('', accountMarker(key, total, index));
+
+  return sendMessage(chatId, lines.join('\n'), {
+    reply_markup: {
+      force_reply: true,
+      selective: true,
+      input_field_placeholder: 'name@gmail.com',
+    },
+  });
+}
+
+async function startInputFlow(chatId, key, total, runtime) {
+  if (!livePurchases(runtime)) return sendMessage(chatId, 'الشراء مقفل مؤقتاً، تقدر تتصفح لين يرجع يشتغل.');
+  const product = await findProduct(key, runtime);
+  if (!product) return sendMessage(chatId, 'الخدمة مو متوفرة حالياً.');
+  if (!canPurchaseWithInput(product)) return sendMessage(chatId, 'متطلبات هالخدمة ما هي مدعومة تلقائياً حالياً.');
+  if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) return sendMessage(chatId, 'الخدمة خلصت حالياً.');
+  return askForAccount(chatId, key, Math.min(3, Math.max(1, Number(total) || 1)), 1, []);
+}
+
+function inputInvoicePayload(key, stars, email) {
+  const payload = `buyi:${key}:${stars}:${encodeURIComponent(email)}`;
+  return Buffer.byteLength(payload, 'utf8') <= 128 ? payload : null;
+}
+
+async function sendInputInvoice(chatId, user, key, runtime, email, index, total) {
+  const product = await findProduct(key, runtime);
+  if (!product || !canPurchaseWithInput(product)) return sendMessage(chatId, `❌ تعذر تجهيز فاتورة الحساب ${index}.`);
+  const stars = priceToStars(product.price, runtime);
+  if (!stars) return sendMessage(chatId, `❌ السعر غير متوفر للحساب ${index}.`);
+  const payload = inputInvoicePayload(product.key, stars, email);
+  if (!payload) return sendMessage(chatId, `❌ بريد الحساب ${index} طويل أكثر من الحد المدعوم.`);
+
+  return tg('sendInvoice', {
+    chat_id: chatId,
+    title: short(product.name, 32),
+    description: `الحساب ${index}/${total}: ${email}`.slice(0, 255),
+    payload,
+    currency: 'XTR',
+    prices: [{ label: `الحساب ${index}`, amount: stars }],
+  });
+}
+
+async function handleAccountReply(message, runtime) {
+  const state = parseAccountPrompt(message.reply_to_message?.text);
+  if (!state) return false;
+
+  const email = String(message.text || '').trim();
+  if (!validCustomerEmail(email)) {
+    await sendMessage(message.chat.id, '❌ البريد مو واضح. ارسله بالشكل هذا: name@gmail.com');
+    await askForAccount(message.chat.id, state.key, state.total, state.index, state.accounts);
+    return true;
+  }
+
+  const accounts = [...state.accounts, email];
+  if (state.index < state.total) {
+    await askForAccount(message.chat.id, state.key, state.total, state.index + 1, accounts);
+    return true;
+  }
+
+  await sendMessage(
+    message.chat.id,
+    `✅ استلمت ${accounts.length} ${accounts.length === 1 ? 'حساب' : 'حسابات'}.\nكل حساب له فاتورة مستقلة لأن المورد ينفذ حساب واحد بكل طلب.`,
+  );
+
+  for (let i = 0; i < accounts.length; i += 1) {
+    await sendInputInvoice(message.chat.id, message.from, state.key, runtime, accounts[i], i + 1, accounts.length);
+  }
+  return true;
+}
+
 async function showProduct(chatId, key, runtime) {
   const product = await findProduct(key, runtime);
   if (!product) return sendMessage(chatId, 'الخدمة مو متوفرة حالياً.');
@@ -291,6 +400,7 @@ async function showProduct(chatId, key, runtime) {
   const available = product?.availability?.available;
   const inStock = typeof available !== 'number' || available > 0;
   const auto = canAutoPurchase(product);
+  const inputPurchase = canPurchaseWithInput(product);
   const category = categoryOf(product);
   const description = detailText(product.description);
   const requirements = requirementSummary(product.purchaseRequirements);
@@ -303,12 +413,21 @@ async function showProduct(chatId, key, runtime) {
   if (description) lines.push(description, '');
   lines.push(stars ? `⭐ السعر: ${stars} نجمة` : '⭐ السعر: غير متوفر');
   if (typeof available === 'number') lines.push(available > 0 ? `📦 المتاح: ${available}` : '⛔ غير متوفر حالياً');
-  if (requirements) lines.push(`📝 المطلوب: ${requirements}`);
+  if (inputPurchase) lines.push('📧 المطلوب: بريد الحساب فقط — بدون كلمة مرور.');
+  else if (requirements) lines.push(`📝 المطلوب: ${requirements}`);
   else if (product.requiresInput) lines.push('📝 يحتاج بيانات من العميل قبل التنفيذ.');
   else if (!auto) lines.push('⚠️ هذا المنتج يحتاج تنفيذ خاص قبل الشراء.');
 
   const keyboard = { inline_keyboard: [] };
-  if (stars && inStock && auto) keyboard.inline_keyboard.push([{ text: '⭐ شراء الآن', callback_data: `buy:${product.key}` }]);
+  if (stars && inStock && auto) {
+    keyboard.inline_keyboard.push([{ text: '⭐ شراء الآن', callback_data: `buy:${product.key}` }]);
+  } else if (stars && inStock && inputPurchase) {
+    keyboard.inline_keyboard.push([
+      { text: '🛒 حساب واحد', callback_data: `form:${product.key}:1` },
+      { text: '🛒 حسابين', callback_data: `form:${product.key}:2` },
+    ]);
+    keyboard.inline_keyboard.push([{ text: '🛒 3 حسابات', callback_data: `form:${product.key}:3` }]);
+  }
   keyboard.inline_keyboard.push([{ text: `⬅️ ${category.label}`, callback_data: `cat:${category.slug}` }]);
 
   return sendMessage(chatId, lines.join('\n'), { reply_markup: keyboard });
@@ -333,17 +452,29 @@ async function startInvoice(chatId, user, key, runtime) {
   });
 }
 
+function parseInvoicePayload(payload) {
+  const parts = String(payload || '').split(':');
+  const kind = parts[0];
+  const key = parts[1] || '';
+  const charged = Number(parts[2]);
+  let customerEmail = '';
+  if (kind === 'buyi' && parts[3]) {
+    try { customerEmail = decodeURIComponent(parts.slice(3).join(':')); } catch { customerEmail = ''; }
+  }
+  return { kind, key, charged, customerEmail };
+}
+
 async function validateCheckout(query, runtime) {
   try {
-    const [kind, key, chargedRaw] = String(query.invoice_payload || '').split(':');
-    if (kind !== 'buy') throw new Error('طلب غير صالح');
-    const product = await findProduct(key, runtime);
+    const payload = parseInvoicePayload(query.invoice_payload);
+    if (!['buy', 'buyi'].includes(payload.kind)) throw new Error('طلب غير صالح');
+    const product = await findProduct(payload.key, runtime);
     if (!product) throw new Error('الخدمة مو متوفرة');
-    if (!canAutoPurchase(product)) throw new Error('الخدمة تحتاج بيانات إضافية');
+    if (payload.kind === 'buy' && !canAutoPurchase(product)) throw new Error('الخدمة تحتاج بيانات إضافية');
+    if (payload.kind === 'buyi' && (!canPurchaseWithInput(product) || !validCustomerEmail(payload.customerEmail))) throw new Error('بيانات الحساب غير صالحة');
     if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) throw new Error('الخدمة نفدت');
     const expected = priceToStars(product.price, runtime);
-    const charged = Number(chargedRaw);
-    if (!expected || expected !== charged || query.total_amount !== charged || query.currency !== 'XTR') throw new Error('السعر تغيّر، افتح الخدمة من جديد');
+    if (!expected || expected !== payload.charged || query.total_amount !== payload.charged || query.currency !== 'XTR') throw new Error('السعر تغيّر، افتح الخدمة من جديد');
     await tg('answerPreCheckoutQuery', { pre_checkout_query_id: query.id, ok: true });
   } catch (error) {
     await tg('answerPreCheckoutQuery', { pre_checkout_query_id: query.id, ok: false, error_message: `ما قدرنا نكمل الطلب: ${error.message}`.slice(0, 200) });
@@ -354,23 +485,24 @@ async function deliverPaidOrder(message, runtime) {
   const payment = message.successful_payment;
   const user = message.from;
   const chatId = message.chat.id;
-  const [kind, key, chargedRaw] = String(payment.invoice_payload || '').split(':');
-  const charged = Number(chargedRaw);
+  const payload = parseInvoicePayload(payment.invoice_payload);
 
   try {
-    if (kind !== 'buy') throw new Error('بيانات الدفع غير صالحة');
-    const product = await findProduct(key, runtime);
+    if (!['buy', 'buyi'].includes(payload.kind)) throw new Error('بيانات الدفع غير صالحة');
+    const product = await findProduct(payload.key, runtime);
     if (!product) throw new Error('الخدمة اختفت من المورد');
-    if (!canAutoPurchase(product)) throw new Error('الخدمة تحتاج بيانات إضافية');
+    if (payload.kind === 'buy' && !canAutoPurchase(product)) throw new Error('الخدمة تحتاج بيانات إضافية');
+    if (payload.kind === 'buyi' && (!canPurchaseWithInput(product) || !validCustomerEmail(payload.customerEmail))) throw new Error('بيانات الحساب غير صالحة');
     const expected = priceToStars(product.price, runtime);
-    if (!expected || expected !== charged || payment.total_amount !== charged || payment.currency !== 'XTR') throw new Error('السعر تغيّر بعد الدفع');
+    if (!expected || expected !== payload.charged || payment.total_amount !== payload.charged || payment.currency !== 'XTR') throw new Error('السعر تغيّر بعد الدفع');
 
     await sendMessage(chatId, '✅ وصل الدفع، جاري تجهيز طلبك...');
-    const result = await purchaseProduct(product, user, `tg-charge-${payment.telegram_payment_charge_id}`);
-    await sendLongMessage(chatId, `✅ تم طلبك بنجاح.\n\n${JSON.stringify(result, null, 2)}`);
+    const inputs = payload.kind === 'buyi' ? { customerEmail: payload.customerEmail } : {};
+    const result = await purchaseProduct(product, user, `tg-charge-${payment.telegram_payment_charge_id}`, inputs);
+    await sendLongMessage(chatId, `✅ تم طلبك بنجاح.${payload.customerEmail ? `\nالحساب: ${payload.customerEmail}` : ''}\n\n${JSON.stringify(result, null, 2)}`);
 
     const adminId = cfg.adminId();
-    if (adminId) await sendMessage(adminId, `✅ طلب ناجح\nالمستخدم: ${user.id}${user.username ? ` @${user.username}` : ''}\nالمنتج: ${product.name}\nالمدفوع: ${charged} ⭐`);
+    if (adminId) await sendMessage(adminId, `✅ طلب ناجح\nالمستخدم: ${user.id}${user.username ? ` @${user.username}` : ''}\nالمنتج: ${product.name}${payload.customerEmail ? `\nالحساب: ${payload.customerEmail}` : ''}\nالمدفوع: ${payload.charged} ⭐`);
   } catch (error) {
     try {
       await tg('refundStarPayment', { user_id: user.id, telegram_payment_charge_id: payment.telegram_payment_charge_id });
@@ -404,7 +536,9 @@ export default async function handler(req, res) {
     } else if (update.message) {
       const rawText = String(update.message.text || '').trim();
       const text = rawText.toLowerCase();
-      if (text === '/start') {
+      if (await handleAccountReply(update.message, runtime)) {
+        // Force-reply purchase flow handled above.
+      } else if (text === '/start') {
         await resetMenuButton();
         await showNativeHome(update.message.chat.id, runtime);
       } else if (text === '/products' || text === '🛍 products' || text === 'المنتجات') {
@@ -433,6 +567,10 @@ export default async function handler(req, res) {
       }
       else if (data.startsWith('p:')) await showProduct(query.message.chat.id, data.slice(2), runtime);
       else if (data.startsWith('buy:')) await startInvoice(query.message.chat.id, query.from, data.slice(4), runtime);
+      else if (data.startsWith('form:')) {
+        const [, key, total] = data.split(':');
+        await startInputFlow(query.message.chat.id, key, total, runtime);
+      }
     }
 
     return res.status(200).json({ ok: true });
