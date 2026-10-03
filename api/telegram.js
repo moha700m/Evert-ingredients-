@@ -50,13 +50,8 @@ function priceToStars(price, runtime) {
   return Math.max(1, Math.ceil(price * rate * (1 + markup / 100)));
 }
 
-function hiddenIds(runtime) {
-  return new Set(Array.isArray(runtime?.hiddenProductIds) ? runtime.hiddenProductIds.map(String) : []);
-}
-
-async function visibleProducts(runtime) {
-  const hidden = hiddenIds(runtime);
-  return (await fetchProducts()).filter(product => !hidden.has(String(product.id)));
+async function visibleProducts() {
+  return fetchProducts();
 }
 
 async function findProduct(key, runtime) {
@@ -68,6 +63,65 @@ function short(value, max = 34) {
   if (!text) return 'منتج';
   if (text.length <= max) return text;
   return `${text.slice(0, max - 1).trim()}…`;
+}
+
+function detailText(value, max = 700) {
+  const text = String(value || '')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!text) return '';
+  return text.length <= max ? text : `${text.slice(0, max - 1).trim()}…`;
+}
+
+function requirementSummary(value) {
+  const parts = [];
+
+  function add(valueToAdd) {
+    const text = String(valueToAdd || '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!text || /^(true|false|null|undefined)$/i.test(text)) return;
+    if (!parts.some(part => part.toLowerCase() === text.toLowerCase())) parts.push(text);
+  }
+
+  function walk(node, key = '') {
+    if (parts.length >= 8 || node == null) return;
+    if (typeof node === 'string') {
+      const clean = node.trim();
+      if (clean) add(key && clean.toLowerCase() !== key.toLowerCase() ? `${key}: ${clean}` : clean);
+      return;
+    }
+    if (typeof node === 'boolean') {
+      if (node && key) add(key);
+      return;
+    }
+    if (typeof node === 'number') {
+      if (key) add(`${key}: ${node}`);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, key);
+      return;
+    }
+    if (typeof node === 'object') {
+      const preferred = ['label', 'name', 'title', 'description', 'placeholder'];
+      let usedPreferred = false;
+      for (const field of preferred) {
+        if (typeof node[field] === 'string' && node[field].trim()) {
+          add(node[field]);
+          usedPreferred = true;
+        }
+      }
+      for (const [childKey, child] of Object.entries(node)) {
+        if (preferred.includes(childKey)) continue;
+        if (usedPreferred && ['required', 'type'].includes(childKey)) continue;
+        walk(child, childKey);
+      }
+    }
+  }
+
+  walk(value);
+  return parts.slice(0, 6).join(' • ');
 }
 
 function categoryOf(product) {
@@ -238,16 +292,20 @@ async function showProduct(chatId, key, runtime) {
   const inStock = typeof available !== 'number' || available > 0;
   const auto = canAutoPurchase(product);
   const category = categoryOf(product);
+  const description = detailText(product.description);
+  const requirements = requirementSummary(product.purchaseRequirements);
 
   const lines = [
-    `${category.icon} ${short(product.name, 70)}`,
+    `${category.icon} ${short(product.name, 90)}`,
     '',
-    'جاهز وسريع، مناسب للي يبي الخدمة بدون تعقيد.',
-    '',
-    stars ? `⭐ السعر: ${stars} نجمة` : '⭐ السعر: غير متوفر',
   ];
+
+  if (description) lines.push(description, '');
+  lines.push(stars ? `⭐ السعر: ${stars} نجمة` : '⭐ السعر: غير متوفر');
   if (typeof available === 'number') lines.push(available > 0 ? `📦 المتاح: ${available}` : '⛔ غير متوفر حالياً');
-  if (!auto) lines.push('⚠️ يحتاج بيانات إضافية قبل التنفيذ.');
+  if (requirements) lines.push(`📝 المطلوب: ${requirements}`);
+  else if (product.requiresInput) lines.push('📝 يحتاج بيانات من العميل قبل التنفيذ.');
+  else if (!auto) lines.push('⚠️ هذا المنتج يحتاج تنفيذ خاص قبل الشراء.');
 
   const keyboard = { inline_keyboard: [] };
   if (stars && inStock && auto) keyboard.inline_keyboard.push([{ text: '⭐ شراء الآن', callback_data: `buy:${product.key}` }]);
