@@ -51,7 +51,20 @@ export default async function handler(req, res) {
     const products = normalizeProducts(raw);
     result.canboso.reachable = true;
     result.canboso.productsCount = products.length;
-    result.canboso.sample = products.slice(0, 3).map(p => ({ id: p.id, name: p.name, price: p.price }));
+    result.canboso.sample = products.slice(0, 3).map(p => ({
+      id: p.id,
+      name: p.name,
+      price: p.price,
+      currency: p.currency,
+      priceText: p.priceText,
+      supplierPrice: p.raw?.price && typeof p.raw.price === "object"
+        ? {
+            amount: p.raw.price.amount ?? null,
+            currency: p.raw.price.currency ?? null,
+            text: p.raw.price.text ?? null,
+          }
+        : p.raw?.price ?? null,
+    }));
 
     const first = products[0]?.raw;
     if (first && typeof first === "object" && !Array.isArray(first)) {
