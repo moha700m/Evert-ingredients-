@@ -6,6 +6,7 @@
 
 - الأسرار تحفظ في Vercel Environment Variables فقط.
 - ابدأ مع `ENABLE_LIVE_PURCHASES=false`.
+- بعد إضافة أو تعديل Environment Variables في Vercel، نفّذ Redeploy للإنتاج حتى تُحمّل القيم الجديدة.
 - بعد النشر نفّذ `/api/setup?secret=YOUR_SETUP_SECRET` لربط Webhook.
 - افحص `/api/debug-products?secret=YOUR_SETUP_SECRET` قبل تفعيل البيع الحقيقي.
 
