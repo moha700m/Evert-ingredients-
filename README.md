@@ -1,19 +1,47 @@
-# Arabic Telegram Store Bot
+# New Telegram Store Bot v2
 
-بوت متجر عربي على Telegram + Vercel يقرأ منتجات Canboso/CipherForge، يترجم الاسم والوصف للعربية، ويجهز الدفع عبر Telegram Stars.
+نسخة مستقلة قابلة لإعادة الاستخدام من بوت المتجر العربي على Telegram. تعرض منتجات Canboso، تنظمها في أقسام، تستخدم شبكة أقسام 3 أعمدة ومنتجات عمودين، وتدعم الدفع عبر Telegram Stars مع محاولة استرجاع النجوم تلقائيًا إذا فشل تنفيذ المورد بعد الدفع.
 
-## النشر
+## هذا الفرع مستقل
 
-- الأسرار تحفظ في Vercel Environment Variables فقط.
-- ابدأ مع `ENABLE_LIVE_PURCHASES=false`.
-- بعد إضافة أو تعديل Environment Variables في Vercel، نفّذ Redeploy للإنتاج حتى تُحمّل القيم الجديدة.
-- بعد النشر نفّذ `/api/setup?secret=YOUR_SETUP_SECRET` لربط Webhook.
-- افحص `/api/debug-products?secret=YOUR_SETUP_SECRET` قبل تفعيل البيع الحقيقي.
+الفرع `new-bot-v2` لا يعتمد افتراضيًا على لوحة تحكم البوت القديم. `CONTROL_PANEL_CONFIG_URL` يبقى فارغًا حتى يتم إنشاء لوحة خاصة بالبوت الجديد.
 
-## متغيرات أساسية
+## المطلوب عند إنشاء البوت الجديد
 
-راجع `.env.example` لكل الإعدادات المطلوبة.
+أضف القيم التالية في الاستضافة فقط، ولا تضعها في GitHub:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ADMIN_ID`
+- `CANBOSO_API_KEY`
+- `WEBHOOK_SECRET`
+- `SETUP_SECRET`
+- `PUBLIC_BASE_URL`
+
+اختياريًا بعد إنشاء لوحة تحكم مستقلة:
+
+- `CONTROL_PANEL_CONFIG_URL`
+
+ابدأ دائمًا بـ `ENABLE_LIVE_PURCHASES=false` حتى يتم اختبار الكتالوج والـWebhook، ثم فعّل الشراء الحقيقي بعد التحقق.
+
+## الإعداد الافتراضي
+
+- `STAR_RATE=100`
+- `MARKUP_PERCENT=25`
+- `PRODUCTS_PAGE_SIZE=8`
+- الأقسام: 3 أعمدة
+- المنتجات: عمودان بأسماء مختصرة وواضحة
+- المنتجات التي تحتاج بيانات إضافية لا تدخل الشراء التلقائي
+
+## التحقق
+
+شغّل:
+
+```bash
+npm run check
+```
+
+ثم اربط Webhook بعد النشر وتأكد من `/start` والمنتجات والفاتورة قبل تفعيل البيع المباشر.
 
 ## الأمان
 
-لا تضع Bot Token أو API Key في GitHub. عند فشل شراء المورد بعد دفع Stars، يحاول البوت تنفيذ `refundStarPayment` تلقائيًا.
+لا تحفظ Bot Token أو Canboso API Key أو أسرار الإدارة داخل المستودع. عند فشل تنفيذ المورد بعد نجاح دفع Telegram Stars، يحاول البوت `refundStarPayment` تلقائيًا.
