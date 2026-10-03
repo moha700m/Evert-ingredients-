@@ -92,12 +92,29 @@ export default async function handler(req, res) {
       if (sticker?.custom_emoji_id) mapping[BRANDS[i][0]] = sticker.custom_emoji_id;
     }
 
+    let buttonTest = null;
+    if (req.query?.test === '1' && mapping.chatgpt) {
+      const sent = await tg('sendMessage', {
+        chat_id: owner,
+        text: '✅ اختبار شعار ChatGPT داخل زر تيليجرام',
+        reply_markup: {
+          inline_keyboard: [[{
+            text: 'ChatGPT',
+            icon_custom_emoji_id: mapping.chatgpt,
+            callback_data: 'cats',
+          }]],
+        },
+      });
+      buttonTest = { ok: true, messageId: sent?.message_id || null };
+    }
+
     return res.status(200).json({
       ok: true,
       setName,
       count: Object.keys(mapping).length,
       total: BRANDS.length,
       complete: Object.keys(mapping).length >= BRANDS.length,
+      buttonTest,
       mapping,
     });
   } catch (error) {
