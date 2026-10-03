@@ -1,5 +1,5 @@
 import { cfg } from './_lib/config.js';
-import { tg, sendMessage, sendLongMessage, answerCallbackQuery } from './_lib/telegram.js';
+import { tg, sendMessage, sendLongMessage, answerCallbackQuery, categoryButton } from './_lib/telegram.js';
 import { fetchProducts, purchaseProduct, canAutoPurchase } from './_lib/products.js';
 import { getRuntimeConfig } from './_lib/runtime-config.js';
 
@@ -116,10 +116,7 @@ async function showCategories(chatId, runtime) {
   const ordered = CATEGORIES.map(category => groups.get(category.slug)).filter(Boolean);
   if (groups.has('other')) ordered.push(groups.get('other'));
 
-  const buttons = ordered.map(group => ({
-    text: `${group.category.icon} ${group.category.label}`,
-    callback_data: `cat:${group.category.slug}`,
-  }));
+  const buttons = ordered.map(group => categoryButton(group.category.slug, group.category.label));
 
   return sendMessage(chatId, 'اختر الخدمة اللي تبيها 👇', {
     reply_markup: { inline_keyboard: chunk(buttons, 3) },
