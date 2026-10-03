@@ -101,7 +101,10 @@ async function upstream(path, init = {}) {
     const retryAuth = [401, 403].includes(r.status) || isMissingApiKeyError(r.status, data);
     if (!retryAuth) break;
   }
-  throw new Error(`Canboso API error ${last?.status || "unknown"}: ${JSON.stringify(last?.data || {})}`);
+  const error = new Error(`Canboso API error ${last?.status || "unknown"}: ${JSON.stringify(last?.data || {})}`);
+  error.status = last?.status || 0;
+  error.data = last?.data || {};
+  throw error;
 }
 
 function parseNumeric(value) {
@@ -290,6 +293,21 @@ export async function arabizeProduct(p) {
   return { ...p, nameAr, descAr };
 }
 
+export function purchaseInputFields(product) {
+  const requirements = product?.purchaseRequirements;
+  if (!requirements || typeof requirements !== "object" || Array.isArray(requirements)) return [];
+  const metadata = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity"]);
+  return Object.entries(requirements)
+    .filter(([key, value]) => !metadata.has(key) && (value === true || (value && typeof value === "object" && value.required === true)))
+    .map(([key]) => key);
+}
+
+export function canPurchaseWithInput(product) {
+  if (!product || !product.sourceIdValid) return false;
+  const fields = purchaseInputFields(product);
+  return fields.length > 0 && fields.every(field => field === "customerEmail");
+}
+
 export function canAutoPurchase(product) {
   if (!product || !product.sourceIdValid) return false;
   if (product.id === "slot_chatgpt_business") return false;
@@ -314,8 +332,18 @@ function renderTemplate(value, vars) {
   return value;
 }
 
-export async function purchaseProduct(product, user, idempotencyKey = "") {
-  if (!canAutoPurchase(product)) throw new Error("هذا المنتج يتطلب بيانات إضافية قبل الشراء");
+export async function purchaseProduct(product, user, idempotencyKey = "", inputs = {}) {
+  if (!product || !product.sourceIdValid) throw new Error("بيانات المنتج غير صالحة للشراء");
+
+  const inputFields = purchaseInputFields(product);
+  if (inputFields.length) {
+    if (!canPurchaseWithInput(product)) throw new Error("متطلبات هذا المنتج غير مدعومة تلقائياً");
+    for (const field of inputFields) {
+      if (!String(inputs[field] ?? "").trim()) throw new Error(`البيانات المطلوبة ناقصة: ${field}`);
+    }
+  } else if (!canAutoPurchase(product)) {
+    throw new Error("هذا المنتج يحتاج تنفيذ خاص قبل الشراء");
+  }
 
   let template;
   try {
@@ -324,20 +352,40 @@ export async function purchaseProduct(product, user, idempotencyKey = "") {
     throw new Error("PURCHASE_BODY_TEMPLATE is not valid JSON");
   }
 
-  const body = renderTemplate(template, {
+  const baseBody = renderTemplate(template, {
     buyer_key: cfg.canbosoKey(),
     product_id: product.id,
     telegram_user_id: user?.id ?? "",
     telegram_username: user?.username ?? "",
   });
 
-  if (!body.key) body.key = cfg.canbosoKey();
-  if (!body.product_id) body.product_id = product.id;
-  if (!body.quantity) body.quantity = 1;
+  if (!baseBody.key) baseBody.key = cfg.canbosoKey();
+  if (!baseBody.product_id) baseBody.product_id = product.id;
+  baseBody.quantity = 1;
 
-  return upstream(cfg.purchasePath(), {
-    method: "POST",
-    headers: { "Idempotency-Key": idempotencyKey || `telegram-${user?.id || "unknown"}-${product.key}-${Date.now()}` },
-    body: JSON.stringify(body),
-  });
+  const customerEmail = String(inputs.customerEmail ?? "").trim();
+  const variants = customerEmail
+    ? [
+        { ...baseBody, customer_email: customerEmail },
+        { ...baseBody, customerEmail },
+        { ...baseBody, email: customerEmail },
+      ]
+    : [baseBody];
+
+  let lastError;
+  for (let index = 0; index < variants.length; index += 1) {
+    try {
+      return await upstream(cfg.purchasePath(), {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey || `telegram-${user?.id || "unknown"}-${product.key}-${Date.now()}` },
+        body: JSON.stringify(variants[index]),
+      });
+    } catch (error) {
+      lastError = error;
+      const mayTryFieldAlias = [400, 422].includes(Number(error.status));
+      if (!mayTryFieldAlias || index === variants.length - 1) throw error;
+    }
+  }
+
+  throw lastError || new Error("تعذر تنفيذ الطلب");
 }
