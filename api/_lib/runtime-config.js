@@ -13,7 +13,8 @@ function normalize(settings) {
     markupPercent: Number.isFinite(Number(settings.markupPercent)) ? Number(settings.markupPercent) : null,
     starRate: Number.isFinite(Number(settings.starRate)) && Number(settings.starRate) > 0 ? Number(settings.starRate) : null,
     productsPageSize: Number.isFinite(Number(settings.productsPageSize)) ? Number(settings.productsPageSize) : null,
-    hiddenProductIds: Array.isArray(settings.hiddenProductIds) ? settings.hiddenProductIds.map(String) : [],
+    // Always expose every product returned by Canboso. Runtime hiding is intentionally disabled.
+    hiddenProductIds: [],
   };
 }
 
