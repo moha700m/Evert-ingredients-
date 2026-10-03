@@ -42,6 +42,15 @@ function authCandidates() {
   ];
 }
 
+function isMissingApiKeyError(status, data) {
+  if (status !== 400) return false;
+  const text = JSON.stringify(data || {}).toLowerCase();
+  return text.includes("thieu key api") ||
+    text.includes("missing api key") ||
+    text.includes("api key missing") ||
+    text.includes("missing key api");
+}
+
 async function upstream(path, init = {}) {
   const url = `${cfg.canbosoBaseUrl()}${path}`;
   let last;
@@ -61,7 +70,8 @@ async function upstream(path, init = {}) {
     try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
     if (r.ok) return data;
     last = { status: r.status, data };
-    if (![401, 403].includes(r.status)) break;
+    const retryAuth = [401, 403].includes(r.status) || isMissingApiKeyError(r.status, data);
+    if (!retryAuth) break;
   }
   throw new Error(`Canboso API error ${last?.status || "unknown"}: ${JSON.stringify(last?.data || {})}`);
 }
