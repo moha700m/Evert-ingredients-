@@ -1,0 +1,67 @@
+name: Swagger Discovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/swagger-discovery.yml'
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Discover Canboso OpenAPI document
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://canboso.com'
+          SWAGGER="$BASE/api/swagger/"
+          echo '--- swagger html markers ---'
+          curl -fsSL "$SWAGGER" -o swagger.html
+          grep -Eo '(https?://[^"'"'"' ]+|[A-Za-z0-9_./-]+\.(json|js))' swagger.html | sort -u | head -100 || true
+          echo '--- swagger config snippets ---'
+          grep -Eio '.{0,100}(swagger|openapi|spec|url).{0,180}' swagger.html | head -100 || true
+
+          candidates=(
+            '/api/swagger-json'
+            '/api/swagger/swagger.json'
+            '/api/swagger/openapi.json'
+            '/api/swagger/spec.json'
+            '/api-json'
+            '/swagger-json'
+            '/openapi.json'
+            '/swagger.json'
+          )
+          for path in "${candidates[@]}"; do
+            code=$(curl -sS -L -o candidate.json -w '%{http_code}' "$BASE$path" || true)
+            ctype=$(file -b --mime-type candidate.json 2>/dev/null || true)
+            echo "$path -> HTTP $code type=$ctype bytes=$(wc -c < candidate.json 2>/dev/null || echo 0)"
+            if [ "$code" = '200' ] && grep -Eq '"(openapi|swagger)"' candidate.json; then
+              echo "FOUND_OPENAPI=$path"
+              node - <<'NODE'
+          const fs=require('fs');
+          const j=JSON.parse(fs.readFileSync('candidate.json','utf8'));
+          console.log('version', j.openapi || j.swagger);
+          for (const [path, methods] of Object.entries(j.paths || {})) {
+            if (!path.includes('telegram-buyer')) continue;
+            console.log('PATH', path);
+            for (const [method, op] of Object.entries(methods || {})) {
+              if (!['get','post','put','patch','delete'].includes(method)) continue;
+              console.log(' METHOD', method.toUpperCase(), 'summary=', op.summary || '');
+              const rb=op.requestBody?.content || {};
+              for (const [ct, def] of Object.entries(rb)) console.log('  BODY', ct, JSON.stringify(def.schema || {}));
+              for (const p of op.parameters || []) console.log('  PARAM', JSON.stringify({name:p.name,in:p.in,required:p.required,schema:p.schema}));
+              const responses=op.responses || {};
+              for (const [status, resp] of Object.entries(responses)) {
+                const c=resp?.content?.['application/json']?.schema;
+                if (c) console.log('  RESP', status, JSON.stringify(c));
+              }
+            }
+          }
+NODE
+              exit 0
+            fi
+          done
+          echo 'No OpenAPI JSON found via common paths.'
+          exit 1
