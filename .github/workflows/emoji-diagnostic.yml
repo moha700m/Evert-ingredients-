@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/emoji-diagnostic.yml'
+      - 'api/emoji-diagnostic.js'
   workflow_dispatch:
 
 jobs:
