@@ -34,6 +34,7 @@ function authCandidates() {
     return [{ [explicitHeader]: explicitPrefix ? `${explicitPrefix} ${key}` : key }];
   }
   return [
+    { "x-buyer-key": key },
     { Authorization: `Bearer ${key}` },
     { Authorization: key },
     { "X-API-Key": key },
@@ -97,8 +98,14 @@ function normalizePrice(rawPrice) {
   return { amount: parseNumeric(rawPrice), currency: "", text: "" };
 }
 
+function productsPathWithBuyerKey() {
+  const path = cfg.productsPath();
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}key=${encodeURIComponent(cfg.canbosoKey())}`;
+}
+
 export async function fetchRawProducts() {
-  return upstream(cfg.productsPath(), { method: "GET" });
+  return upstream(productsPathWithBuyerKey(), { method: "GET" });
 }
 
 export function normalizeProducts(raw) {
@@ -116,6 +123,9 @@ export function normalizeProducts(raw) {
       key,
       name: String(name),
       description: String(description),
+      productType: p.productType ? String(p.productType) : "",
+      purchaseRequirements: p.purchaseRequirements ?? null,
+      availability: p.availability ?? null,
       price: normalizedPrice.amount,
       currency: normalizedPrice.currency,
       priceText: normalizedPrice.text,
@@ -131,6 +141,13 @@ export async function fetchProducts() {
 export async function arabizeProduct(p) {
   const [nameAr, descAr] = await Promise.all([toArabic(p.name), toArabic(p.description)]);
   return { ...p, nameAr, descAr };
+}
+
+export function canAutoPurchase(product) {
+  if (!product) return false;
+  if (product.id === "slot_chatgpt_business") return false;
+  if (["slot", "upgrade_account"].includes(String(product.productType || "").toLowerCase())) return false;
+  return !product.purchaseRequirements;
 }
 
 export function priceToStars(price) {
@@ -151,15 +168,26 @@ function renderTemplate(value, vars) {
 }
 
 export async function purchaseProduct(product, user, idempotencyKey = "") {
+  if (!canAutoPurchase(product)) throw new Error("هذا المنتج يتطلب بيانات إضافية قبل الشراء");
+
   let template;
-  try { template = JSON.parse(env("PURCHASE_BODY_TEMPLATE", '{"product_id":"{{product_id}}","quantity":1}')); }
-  catch { throw new Error("PURCHASE_BODY_TEMPLATE is not valid JSON"); }
+  try {
+    template = JSON.parse(env("PURCHASE_BODY_TEMPLATE", '{"key":"{{buyer_key}}","product_id":"{{product_id}}","quantity":1}'));
+  } catch {
+    throw new Error("PURCHASE_BODY_TEMPLATE is not valid JSON");
+  }
 
   const body = renderTemplate(template, {
+    buyer_key: cfg.canbosoKey(),
     product_id: product.id,
     telegram_user_id: user?.id ?? "",
     telegram_username: user?.username ?? "",
   });
+
+  // Swagger requires the buyer key inside the purchase JSON body.
+  if (!body.key) body.key = cfg.canbosoKey();
+  if (!body.product_id) body.product_id = product.id;
+  if (!body.quantity) body.quantity = 1;
 
   return upstream(cfg.purchasePath(), {
     method: "POST",
