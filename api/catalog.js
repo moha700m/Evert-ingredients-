@@ -23,13 +23,15 @@ function shortText(value, max = 92) {
   return `${text.slice(0, max).trim()}…`;
 }
 
-function auditText(products) {
+function auditData(products) {
   const types = new Map();
+  const ids = new Set();
+  let duplicateIds = 0;
   let missingIds = 0;
   let missingPrices = 0;
   let withRequirements = 0;
   let autoPurchase = 0;
-  let availableKnown = 0;
+  let availabilityKnown = 0;
   let outOfStock = 0;
 
   for (const product of products) {
@@ -37,30 +39,34 @@ function auditText(products) {
     if (!Number.isFinite(product.price)) missingPrices += 1;
     if (product.requiresInput) withRequirements += 1;
     if (canAutoPurchase(product)) autoPurchase += 1;
+    if (ids.has(product.id)) duplicateIds += 1;
+    ids.add(product.id);
     if (typeof product?.availability?.available === 'number') {
-      availableKnown += 1;
+      availabilityKnown += 1;
       if (product.availability.available <= 0) outOfStock += 1;
     }
     const type = product.productType || 'normal';
     types.set(type, (types.get(type) || 0) + 1);
   }
 
-  const typeSummary = [...types.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([type, count]) => `${type}:${count}`)
-    .join(',');
+  return {
+    total: products.length,
+    uniqueIds: ids.size,
+    duplicateIds,
+    missingIds,
+    missingPrices,
+    withRequirements,
+    autoPurchase,
+    availabilityKnown,
+    outOfStock,
+    types: [...types.entries()].sort((a, b) => b[1] - a[1]),
+  };
+}
 
-  return [
-    'ok=true',
-    `total=${products.length}`,
-    `missing_ids=${missingIds}`,
-    `missing_prices=${missingPrices}`,
-    `with_requirements=${withRequirements}`,
-    `auto_purchase=${autoPurchase}`,
-    `availability_known=${availableKnown}`,
-    `out_of_stock=${outOfStock}`,
-    `types=${typeSummary}`,
-  ].join('\n');
+function auditHtml(products) {
+  const a = auditData(products);
+  const typeRows = a.types.map(([type, count]) => `<li>${String(type).replace(/[<>&]/g, '')}: ${count}</li>`).join('');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><title>Catalog Audit</title></head><body><main><h1>Catalog Audit</h1><p>ok=true</p><p>total=${a.total}</p><p>unique_ids=${a.uniqueIds}</p><p>duplicate_ids=${a.duplicateIds}</p><p>missing_ids=${a.missingIds}</p><p>missing_prices=${a.missingPrices}</p><p>with_requirements=${a.withRequirements}</p><p>auto_purchase=${a.autoPurchase}</p><p>availability_known=${a.availabilityKnown}</p><p>out_of_stock=${a.outOfStock}</p><h2>Types</h2><ul>${typeRows}</ul></main></body></html>`;
 }
 
 export default async function handler(req, res) {
@@ -75,9 +81,10 @@ export default async function handler(req, res) {
     ]);
 
     if (req.query?.audit === '1') {
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store');
-      return res.status(200).send(auditText(products));
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+      return res.status(200).send(auditHtml(products));
     }
 
     const output = products
