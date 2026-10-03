@@ -1,6 +1,7 @@
 import { cfg } from './_lib/config.js';
 import { fetchProducts, canAutoPurchase } from './_lib/products.js';
 import { getRuntimeConfig } from './_lib/runtime-config.js';
+import { tg } from './_lib/telegram.js';
 
 function priceToStars(price, runtime) {
   if (!Number.isFinite(price) || price < 0) return null;
@@ -28,23 +29,29 @@ export default async function handler(req, res) {
   try {
     const runtime = await getRuntimeConfig();
     const hidden = hiddenIds(runtime);
-    const products = (await fetchProducts()).filter(product => !hidden.has(String(product.id)));
+    const [products, me] = await Promise.all([
+      fetchProducts(),
+      tg('getMe').catch(() => null),
+    ]);
 
-    const output = products.map(product => ({
-      id: product.id,
-      key: product.key,
-      name: shortText(product.name, 86),
-      stars: priceToStars(product.price, runtime),
-      available: typeof product?.availability?.available === 'number' ? product.availability.available : null,
-      sold: typeof product?.availability?.sold === 'number' ? product.availability.sold : null,
-      autoPurchase: canAutoPurchase(product),
-      type: product.productType || '',
-    }));
+    const output = products
+      .filter(product => !hidden.has(String(product.id)))
+      .map(product => ({
+        id: product.id,
+        key: product.key,
+        name: shortText(product.name, 86),
+        stars: priceToStars(product.price, runtime),
+        available: typeof product?.availability?.available === 'number' ? product.availability.available : null,
+        sold: typeof product?.availability?.sold === 'number' ? product.availability.sold : null,
+        autoPurchase: canAutoPurchase(product),
+        type: product.productType || '',
+      }));
 
     return res.status(200).json({
       ok: true,
       storeTitle: runtime?.storeTitle || 'كل شي',
       livePurchases: typeof runtime?.livePurchases === 'boolean' ? runtime.livePurchases : cfg.livePurchases(),
+      botUsername: me?.username || '',
       products: output,
     });
   } catch (error) {
