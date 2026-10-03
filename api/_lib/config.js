@@ -39,7 +39,7 @@ export const cfg = {
   // Accept both names so existing Vercel configs keep working.
   starRate: () => numberEnv(["STAR_RATE", "STARS_PER_USD"], 1),
   markup: () => Number(env("MARKUP_PERCENT", "25")) || 0,
-  idKeys: () => csvEnv("PRODUCT_ID_KEYS", "id,product_id,uuid,sku"),
+  idKeys: () => csvEnv("PRODUCT_ID_KEYS", "productId,id,product_id,uuid,sku"),
   nameKeys: () => csvEnv("PRODUCT_NAME_KEYS", "name,title,product_name"),
   descKeys: () => csvEnv("PRODUCT_DESC_KEYS", "description,desc,details"),
   priceKeys: () => csvEnv("PRODUCT_PRICE_KEYS", "price,amount,cost"),
