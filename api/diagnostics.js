@@ -36,6 +36,17 @@ export default async function handler(req, res) {
     result.canboso.reachable = true;
     result.canboso.productsCount = products.length;
     result.canboso.sample = products.slice(0, 3).map(p => ({ id: p.id, name: p.name, price: p.price }));
+
+    const first = products[0]?.raw;
+    if (first && typeof first === "object" && !Array.isArray(first)) {
+      result.canboso.schemaKeys = Object.keys(first);
+      result.canboso.numericKeys = Object.entries(first)
+        .filter(([, value]) => typeof value === "number")
+        .map(([key]) => key);
+      result.canboso.stringKeys = Object.entries(first)
+        .filter(([, value]) => typeof value === "string")
+        .map(([key]) => key);
+    }
   } catch (e) {
     result.canboso.error = e.message;
     result.ok = false;
