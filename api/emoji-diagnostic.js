@@ -10,6 +10,8 @@ export default async function handler(req, res) {
     const chatId = Number(cfg.adminId());
     if (!Number.isSafeInteger(chatId)) throw new Error('TELEGRAM_ADMIN_ID invalid');
 
+    const me = await tg('getMe');
+    const chat = await tg('getChat', { chat_id: `@${me.username}` });
     const stickers = await tg('getCustomEmojiStickers', { custom_emoji_ids: [ICON_ID] });
     const sent = await tg('sendMessage', {
       chat_id: chatId,
@@ -26,6 +28,8 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
+      bot_username: me.username,
+      active_usernames: chat?.active_usernames || [],
       sticker: stickers?.[0] ? {
         custom_emoji_id: stickers[0].custom_emoji_id,
         type: stickers[0].type,
