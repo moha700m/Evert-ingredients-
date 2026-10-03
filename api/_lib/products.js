@@ -9,21 +9,43 @@ function getFirst(obj, keys) {
   return undefined;
 }
 
-function findFirstArray(value, depth = 0) {
-  if (depth > 4 || value == null) return null;
+function productArrayScore(arr) {
+  if (!Array.isArray(arr) || !arr.length) return -1;
+  let score = 0;
+  for (const item of arr.slice(0, 8)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    if (item.productId !== undefined || item.product_id !== undefined || item.id !== undefined) score += 4;
+    if (item.name !== undefined || item.title !== undefined || item.product_name !== undefined) score += 3;
+    if (item.price !== undefined || item.amount !== undefined || item.cost !== undefined) score += 3;
+    if (item.productType !== undefined || item.availability !== undefined || item.purchaseRequirements !== undefined) score += 2;
+  }
+  return score;
+}
+
+function findProductsArray(value, depth = 0) {
+  if (depth > 6 || value == null) return null;
   if (Array.isArray(value)) return value;
   if (typeof value !== "object") return null;
-  for (const key of ["products", "data", "items", "results", "result"]) {
-    if (key in value) {
-      const found = findFirstArray(value[key], depth + 1);
-      if (found) return found;
+
+  const preferred = ["products", "items", "results", "data", "result"];
+  for (const key of preferred) {
+    if (!(key in value)) continue;
+    const found = findProductsArray(value[key], depth + 1);
+    if (found && (found.length === 0 || productArrayScore(found) >= 0)) return found;
+  }
+
+  let best = null;
+  let bestScore = -1;
+  for (const child of Object.values(value)) {
+    const found = findProductsArray(child, depth + 1);
+    if (!found) continue;
+    const score = productArrayScore(found);
+    if (score > bestScore) {
+      best = found;
+      bestScore = score;
     }
   }
-  for (const v of Object.values(value)) {
-    const found = findFirstArray(v, depth + 1);
-    if (found) return found;
-  }
-  return null;
+  return best;
 }
 
 function authCandidates() {
@@ -52,8 +74,13 @@ function isMissingApiKeyError(status, data) {
     text.includes("missing key api");
 }
 
+function upstreamUrl(path) {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${cfg.canbosoBaseUrl()}${path}`;
+}
+
 async function upstream(path, init = {}) {
-  const url = `${cfg.canbosoBaseUrl()}${path}`;
+  const url = upstreamUrl(path);
   let last;
   for (const auth of authCandidates()) {
     const r = await fetch(url, {
@@ -88,7 +115,7 @@ function parseNumeric(value) {
 
 function normalizePrice(rawPrice) {
   if (rawPrice && typeof rawPrice === "object" && !Array.isArray(rawPrice)) {
-    const amount = parseNumeric(rawPrice.amount ?? rawPrice.value ?? rawPrice.price);
+    const amount = parseNumeric(rawPrice.amount ?? rawPrice.value ?? rawPrice.price ?? rawPrice.cost);
     return {
       amount,
       currency: rawPrice.currency ? String(rawPrice.currency).toUpperCase() : "",
@@ -98,40 +125,160 @@ function normalizePrice(rawPrice) {
   return { amount: parseNumeric(rawPrice), currency: "", text: "" };
 }
 
-function productsPathWithBuyerKey() {
-  const path = cfg.productsPath();
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}key=${encodeURIComponent(cfg.canbosoKey())}`;
+function normalizeAvailability(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number" || typeof raw === "string") {
+    const available = parseNumeric(raw);
+    return available === null ? { raw } : { available };
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) return { raw };
+  const out = { ...raw };
+  for (const key of ["available", "sold", "stock", "remaining", "quantity"]) {
+    if (key in out) {
+      const parsed = parseNumeric(out[key]);
+      if (parsed !== null) out[key] = parsed;
+    }
+  }
+  if (out.available === undefined) {
+    const fallback = parseNumeric(out.stock ?? out.remaining ?? out.quantity);
+    if (fallback !== null) out.available = fallback;
+  }
+  return out;
+}
+
+function hasRequirements(value) {
+  if (value == null || value === false) return false;
+  if (typeof value === "string") {
+    const clean = value.trim();
+    return clean !== "" && clean !== "[]" && clean !== "{}" && clean.toLowerCase() !== "null";
+  }
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return Boolean(value);
+}
+
+function addBuyerKeyAndParams(path, params = {}) {
+  const url = new URL(path, `${cfg.canbosoBaseUrl()}/`);
+  if (!url.searchParams.has("key")) url.searchParams.set("key", cfg.canbosoKey());
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  }
+  return url.toString();
+}
+
+function paginationInfo(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const candidates = [
+    raw.pagination,
+    raw.meta?.pagination,
+    raw.data?.pagination,
+    raw.meta,
+    raw.data?.meta,
+  ].filter(x => x && typeof x === "object" && !Array.isArray(x));
+
+  for (const p of candidates) {
+    const current = parseNumeric(p.page ?? p.currentPage ?? p.current_page);
+    const total = parseNumeric(p.totalPages ?? p.total_pages ?? p.pages ?? p.lastPage ?? p.last_page);
+    const nextPage = parseNumeric(p.nextPage ?? p.next_page);
+    const nextCursor = p.nextCursor ?? p.next_cursor ?? null;
+    const nextUrl = typeof p.next === "string" && /^https?:\/\//i.test(p.next) ? p.next : null;
+    const hasNext = p.hasNext ?? p.has_next ?? p.hasMore ?? p.has_more;
+
+    if (nextUrl || nextCursor || nextPage !== null || (current !== null && total !== null) || typeof hasNext === "boolean") {
+      return { current, total, nextPage, nextCursor, nextUrl, hasNext };
+    }
+  }
+  return null;
+}
+
+function sameCanbosoOrigin(url) {
+  try {
+    return new URL(url).origin === new URL(cfg.canbosoBaseUrl()).origin;
+  } catch {
+    return false;
+  }
 }
 
 export async function fetchRawProducts() {
-  return upstream(productsPathWithBuyerKey(), { method: "GET" });
+  const collected = [];
+  let nextPath = addBuyerKeyAndParams(cfg.productsPath());
+  const seen = new Set();
+
+  for (let page = 0; page < 20 && nextPath; page += 1) {
+    if (seen.has(nextPath)) break;
+    seen.add(nextPath);
+
+    const raw = await upstream(nextPath, { method: "GET" });
+    const items = findProductsArray(raw) || [];
+    collected.push(...items);
+
+    const pagination = paginationInfo(raw);
+    if (!pagination) break;
+
+    if (pagination.nextUrl && sameCanbosoOrigin(pagination.nextUrl)) {
+      nextPath = addBuyerKeyAndParams(pagination.nextUrl);
+      continue;
+    }
+    if (pagination.nextCursor) {
+      nextPath = addBuyerKeyAndParams(cfg.productsPath(), { cursor: pagination.nextCursor });
+      continue;
+    }
+    if (pagination.nextPage !== null) {
+      nextPath = addBuyerKeyAndParams(cfg.productsPath(), { page: pagination.nextPage });
+      continue;
+    }
+    if (pagination.current !== null && pagination.total !== null && pagination.current < pagination.total) {
+      nextPath = addBuyerKeyAndParams(cfg.productsPath(), { page: pagination.current + 1 });
+      continue;
+    }
+    if (pagination.hasNext === false) break;
+    break;
+  }
+
+  return { products: collected };
 }
 
 export function normalizeProducts(raw) {
-  const arr = findFirstArray(raw) || [];
-  return arr.filter(x => x && typeof x === "object").map((p, index) => {
-    const id = getFirst(p, cfg.idKeys()) ?? index;
-    const name = getFirst(p, cfg.nameKeys()) ?? `Product ${index + 1}`;
+  const arr = findProductsArray(raw) || [];
+  const normalized = arr.filter(x => x && typeof x === "object" && !Array.isArray(x)).map((p, index) => {
+    const rawId = getFirst(p, cfg.idKeys());
+    const sourceIdValid = rawId !== undefined && String(rawId).trim() !== "";
+    const fallbackHash = crypto.createHash("sha256").update(JSON.stringify(p)).digest("hex").slice(0, 16);
+    const stable = sourceIdValid ? String(rawId) : `missing-id-${fallbackHash}`;
+    const rawName = getFirst(p, cfg.nameKeys());
+    const name = rawName !== undefined ? String(rawName) : `منتج بدون اسم ${index + 1}`;
     const description = getFirst(p, cfg.descKeys()) ?? "";
     const rawPrice = getFirst(p, cfg.priceKeys());
     const normalizedPrice = normalizePrice(rawPrice);
-    const stable = String(id);
+    const requirements = p.purchaseRequirements ?? p.purchase_requirements ?? null;
     const key = crypto.createHash("sha256").update(stable).digest("hex").slice(0, 12);
+
     return {
       id: stable,
+      sourceIdValid,
       key,
-      name: String(name),
+      name,
       description: String(description),
-      productType: p.productType ? String(p.productType) : "",
-      purchaseRequirements: p.purchaseRequirements ?? null,
-      availability: p.availability ?? null,
+      productType: String(p.productType ?? p.product_type ?? ""),
+      purchaseRequirements: requirements,
+      requiresInput: hasRequirements(requirements),
+      availability: normalizeAvailability(p.availability ?? p.stock ?? null),
       price: normalizedPrice.amount,
       currency: normalizedPrice.currency,
       priceText: normalizedPrice.text,
       raw: p,
     };
   });
+
+  const unique = [];
+  const seen = new Set();
+  for (const product of normalized) {
+    const dedupeKey = product.sourceIdValid ? `id:${product.id}` : `fallback:${product.key}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    unique.push(product);
+  }
+  return unique;
 }
 
 export async function fetchProducts() {
@@ -144,10 +291,10 @@ export async function arabizeProduct(p) {
 }
 
 export function canAutoPurchase(product) {
-  if (!product) return false;
+  if (!product || !product.sourceIdValid) return false;
   if (product.id === "slot_chatgpt_business") return false;
   if (["slot", "upgrade_account"].includes(String(product.productType || "").toLowerCase())) return false;
-  return !product.purchaseRequirements;
+  return !product.requiresInput;
 }
 
 export function priceToStars(price) {
@@ -184,7 +331,6 @@ export async function purchaseProduct(product, user, idempotencyKey = "") {
     telegram_username: user?.username ?? "",
   });
 
-  // Swagger requires the buyer key inside the purchase JSON body.
   if (!body.key) body.key = cfg.canbosoKey();
   if (!body.product_id) body.product_id = product.id;
   if (!body.quantity) body.quantity = 1;
