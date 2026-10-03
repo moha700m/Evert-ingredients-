@@ -16,6 +16,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Retry against the already-deployed icon proxy.
           URL='https://evert-ingredients.vercel.app/api/custom-emoji-setup?nonce=rGCKXI3vooPSpPA9z9V_IpDFrmUY3poE'
           code=$(curl -sS --max-time 60 -o result.json -w '%{http_code}' "$URL" || true)
           echo "HTTP $code"
