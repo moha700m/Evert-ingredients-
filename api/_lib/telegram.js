@@ -38,7 +38,8 @@ const BRAND_BUTTONS = {
 };
 
 export function categoryButton(slug, fallbackLabel) {
-  const brand = BRAND_BUTTONS[slug];
+  const otherId = String(process.env.OTHER_ICON_EMOJI_ID || '').trim();
+  const brand = BRAND_BUTTONS[slug] || (slug === 'other' && /^\d+$/.test(otherId) ? [otherId, fallbackLabel] : null);
   const button = { text: brand ? brand[1] : fallbackLabel, callback_data: `cat:${slug}` };
   if (brand) button.icon_custom_emoji_id = brand[0];
   return button;
