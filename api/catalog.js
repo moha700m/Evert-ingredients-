@@ -66,7 +66,10 @@ function auditData(products) {
 function auditHtml(products) {
   const a = auditData(products);
   const typeRows = a.types.map(([type, count]) => `<li>${String(type).replace(/[<>&]/g, '')}: ${count}</li>`).join('');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><title>Catalog Audit</title></head><body><main><h1>Catalog Audit</h1><p>ok=true</p><p>total=${a.total}</p><p>unique_ids=${a.uniqueIds}</p><p>duplicate_ids=${a.duplicateIds}</p><p>missing_ids=${a.missingIds}</p><p>missing_prices=${a.missingPrices}</p><p>with_requirements=${a.withRequirements}</p><p>auto_purchase=${a.autoPurchase}</p><p>availability_known=${a.availabilityKnown}</p><p>out_of_stock=${a.outOfStock}</p><h2>Types</h2><ul>${typeRows}</ul></main></body></html>`;
+  const youtube = products.find(product => /youtube/i.test(`${product.name || ''} ${product.description || ''}`) && product.requiresInput);
+  const req = youtube ? JSON.stringify(youtube.purchaseRequirements ?? null).replace(/[<>]/g, '') : 'none';
+  const title = `Catalog Audit | YouTubeReq=${req}`.slice(0, 900);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow"><title>${title}</title></head><body><main><h1>Catalog Audit</h1><p>ok=true</p><p>total=${a.total}</p><p>unique_ids=${a.uniqueIds}</p><p>duplicate_ids=${a.duplicateIds}</p><p>missing_ids=${a.missingIds}</p><p>missing_prices=${a.missingPrices}</p><p>with_requirements=${a.withRequirements}</p><p>auto_purchase=${a.autoPurchase}</p><p>availability_known=${a.availabilityKnown}</p><p>out_of_stock=${a.outOfStock}</p><h2>Types</h2><ul>${typeRows}</ul></main></body></html>`;
 }
 
 export default async function handler(req, res) {
