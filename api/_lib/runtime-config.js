@@ -1,6 +1,5 @@
 import { env } from './config.js';
 
-const DEFAULT_URL = 'https://bot-control-center-pkbs0c.v2.appdeploy.ai/api/public-config';
 let cache = { at: 0, value: null };
 
 function normalize(settings) {
@@ -21,7 +20,9 @@ export async function getRuntimeConfig() {
   const now = Date.now();
   if (cache.value && now - cache.at < 5000) return cache.value;
 
-  const url = env('CONTROL_PANEL_CONFIG_URL', DEFAULT_URL).trim() || DEFAULT_URL;
+  const url = env('CONTROL_PANEL_CONFIG_URL').trim();
+  if (!url) return cache.value;
+
   try {
     const response = await fetch(url, {
       headers: { accept: 'application/json' },
