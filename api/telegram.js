@@ -141,40 +141,55 @@ function productEmoji(product) {
 }
 
 function durationTag(text) {
-  const month = text.match(/(\d+)\s*(?:month|months|mo\b)/i);
-  if (month) return `${month[1]}M`;
-  const day = text.match(/(\d+)\s*(?:day|days|d\b)/i);
-  if (day) return `${day[1]}D`;
-  const year = text.match(/(\d+)\s*(?:year|years|yr\b)/i);
-  if (year) return `${year[1]}Y`;
-  return '';
+  const match = String(text).match(/(\d+)\s*[- ]?\s*(months?|mos?|m|days?|d|years?|yrs?|y|weeks?|w)\b/i);
+  if (!match) return '';
+  const unit = match[2][0].toUpperCase();
+  return `${match[1]}${unit}`;
+}
+
+function normalizeDurations(text) {
+  return text.replace(/(\d+)\s*[- ]?\s*(months?|mos?|days?|years?|yrs?|weeks?)\b/ig, (_, n, u) => `${n}${u[0].toUpperCase()}`);
+}
+
+function trimLabel(text, max = 18) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return (space >= 6 ? cut.slice(0, space) : cut).trim();
 }
 
 function compactProductName(product) {
   const raw = String(product?.name || '').replace(/https?:\/\/\S+/gi, '').replace(/\s+/g, ' ').trim();
   const lower = raw.toLowerCase();
   const duration = durationTag(raw);
+  const withDuration = base => trimLabel(`${base}${duration ? ` ${duration}` : ''}`);
 
-  const codex = raw.match(/\b(\d+)\s*M\b/i);
-  if (/codex/.test(lower)) return `${codex ? `${codex[1]}M ` : ''}Codex${duration ? ` ${duration}` : ''}`;
-  if (/chat\s*gpt|chatgpt/.test(lower)) return `GPT Plus${duration ? ` ${duration}` : ''}`;
-  if (/\bgrok\b/.test(lower)) return `Grok${duration ? ` ${duration}` : ''}`;
-  if (/vieon/.test(lower)) return `VieON${duration ? ` ${duration}` : ''}`;
-  if (/netflix/.test(lower)) return `Netflix${/4k/i.test(raw) ? ' 4K' : ''}${duration ? ` ${duration}` : ''}`;
-  if (/\bmb\b|mb bank|bank/.test(lower) && /voucher|number|account/.test(lower)) return 'MB Voucher';
-  if (/voucher/.test(lower)) return `Voucher${duration ? ` ${duration}` : ''}`;
-  if (/account/.test(lower)) {
-    const first = raw.replace(/\baccount\b/ig, '').replace(/\b(full|warranty|guarantee|comes? with)\b/ig, '').trim();
-    return short(first, 13);
+  if (/codex/.test(lower)) {
+    const quota = raw.match(/\b(\d+)\s*M\b(?!\w)/);
+    const rest = quota ? raw.replace(quota[0], '') : raw;
+    const restDuration = durationTag(rest);
+    return trimLabel(`${quota ? `${quota[1]}M ` : ''}Codex${restDuration ? ` ${restDuration}` : ''}`);
   }
+  if (/chat\s*gpt|\bgpt\b|openai/.test(lower)) {
+    const tier = /\bpro\b/.test(lower) ? 'Pro' : /\bteam\b/.test(lower) ? 'Team' : 'Plus';
+    return withDuration(`GPT ${tier}`);
+  }
+  if (/gmail|google mail/.test(lower)) return withDuration('Gmail New');
+  if (/youtube/.test(lower)) return withDuration('YouTube');
+  if (/apple\s*id/.test(lower)) return 'Apple ID 2FA';
+  if (/\bgrok\b/.test(lower)) return withDuration('Grok');
+  if (/vieon/.test(lower)) return withDuration('VieON VIP');
+  if (/netflix/.test(lower)) return withDuration(`Netflix${/4k/i.test(raw) ? ' 4K' : ''}`);
+  if (/\bmb\b|bank|voucher/.test(lower) && /\bmb\b|bank/.test(lower)) return 'MB Voucher';
+  if (/voucher/.test(lower)) return withDuration('Voucher');
 
-  const cleaned = raw
-    .replace(/\b(full warranty|warranty|guarantee|full|comes? with|complete|premium account)\b/ig, '')
-    .replace(/\b(1 day|7 days|30 days)\b/ig, '')
-    .replace(/[-–—|]+/g, ' ')
+  const cleaned = normalizeDurations(raw)
+    .replace(/\b(full warranty|warranty|guarantee|guaranteed|full|complete|comes? with|premium|account)\b/ig, '')
+    .replace(/[-–—|,()]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return short(cleaned || raw, 13);
+  return trimLabel(cleaned || raw);
 }
 
 function productGridLabel(product) {
@@ -187,14 +202,14 @@ async function showCategory(chatId, slug, runtime, page = 1) {
   if (!group || !group.products.length) return sendMessage(chatId, 'حالياً ما فيه منتجات بهالقسم.');
 
   const configured = Number(runtime?.productsPageSize);
-  const wanted = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 18) : 9;
-  const pageSize = Math.max(6, Math.ceil(wanted / 3) * 3);
+  const wanted = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 20) : 8;
+  const pageSize = Math.max(4, Math.ceil(wanted / 2) * 2);
   const totalPages = Math.max(1, Math.ceil(group.products.length / pageSize));
   const current = Math.min(Math.max(1, Number.parseInt(page, 10) || 1), totalPages);
   const items = group.products.slice((current - 1) * pageSize, current * pageSize);
 
   const productButtons = items.map(product => ({ text: productGridLabel(product), callback_data: `p:${product.key}` }));
-  const rows = chunk(productButtons, 3);
+  const rows = chunk(productButtons, 2);
 
   if (totalPages > 1) {
     const nav = [];
