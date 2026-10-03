@@ -3,6 +3,7 @@ import { tg } from './_lib/telegram.js';
 
 const NONCE = 'rGCKXI3vooPSpPA9z9V_IpDFrmUY3poE';
 const BATCH_SIZE = 5;
+const ICON_BASE = 'https://evert-ingredients.vercel.app/api/icon';
 
 const BRANDS = [
   ['chatgpt', 'chatgpt.com'],
@@ -40,7 +41,7 @@ const BRANDS = [
 ];
 
 function favicon(domain) {
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=100`;
+  return `${ICON_BASE}?domain=${encodeURIComponent(domain)}`;
 }
 
 function inputSticker([slug, domain]) {
