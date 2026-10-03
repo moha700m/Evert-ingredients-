@@ -6,6 +6,7 @@ import { getRuntimeConfig } from './_lib/runtime-config.js';
 const CATEGORIES = [
   { slug: 'chatgpt', label: 'ChatGPT', icon: '🤖', re: /chatgpt|openai/i },
   { slug: 'google', label: 'Google', icon: '🌈', re: /google one|gemini|google/i },
+  { slug: 'apple', label: 'Apple', icon: '🍎', re: /apple\s*id|icloud|\bapple\b/i },
   { slug: 'capcut', label: 'CapCut', icon: '🎬', re: /capcut/i },
   { slug: 'gmail', label: 'Gmail', icon: '📧', re: /gmail|google mail/i },
   { slug: 'canva', label: 'Canva', icon: '🎨', re: /canva/i },
@@ -126,6 +127,7 @@ async function showCategories(chatId, runtime) {
 function productEmoji(product) {
   const text = `${product?.name || ''} ${product?.description || ''}`;
   const rules = [
+    [/apple\s*id|icloud|\bapple\b/i, '🍎'],
     [/chatgpt|gpt|codex|openai/i, '🤖'],
     [/grok|\bai\b|gemini|claude/i, '🧠'],
     [/netflix|vieon|\btv\b|video|stream/i, '🎬'],
@@ -178,6 +180,7 @@ function compactProductName(product) {
   if (/gmail|google mail/.test(lower)) return withDuration('Gmail New');
   if (/youtube/.test(lower)) return withDuration('YouTube');
   if (/apple\s*id/.test(lower)) return 'Apple ID 2FA';
+  if (/icloud/.test(lower)) return withDuration('iCloud');
   if (/\bgrok\b/.test(lower)) return withDuration('Grok');
   if (/vieon/.test(lower)) return withDuration('VieON VIP');
   if (/netflix/.test(lower)) return withDuration(`Netflix${/4k/i.test(raw) ? ' 4K' : ''}`);
