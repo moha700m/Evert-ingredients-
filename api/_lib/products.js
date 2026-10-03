@@ -76,6 +76,27 @@ async function upstream(path, init = {}) {
   throw new Error(`Canboso API error ${last?.status || "unknown"}: ${JSON.stringify(last?.data || {})}`);
 }
 
+function parseNumeric(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const cleaned = value.trim().replace(/[^0-9.-]/g, "");
+  if (!cleaned || !/[0-9]/.test(cleaned)) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizePrice(rawPrice) {
+  if (rawPrice && typeof rawPrice === "object" && !Array.isArray(rawPrice)) {
+    const amount = parseNumeric(rawPrice.amount ?? rawPrice.value ?? rawPrice.price);
+    return {
+      amount,
+      currency: rawPrice.currency ? String(rawPrice.currency).toUpperCase() : "",
+      text: rawPrice.text ? String(rawPrice.text) : "",
+    };
+  }
+  return { amount: parseNumeric(rawPrice), currency: "", text: "" };
+}
+
 export async function fetchRawProducts() {
   return upstream(cfg.productsPath(), { method: "GET" });
 }
@@ -87,10 +108,19 @@ export function normalizeProducts(raw) {
     const name = getFirst(p, cfg.nameKeys()) ?? `Product ${index + 1}`;
     const description = getFirst(p, cfg.descKeys()) ?? "";
     const rawPrice = getFirst(p, cfg.priceKeys());
-    const price = Number(String(rawPrice ?? "").replace(/[^0-9.-]/g, ""));
+    const normalizedPrice = normalizePrice(rawPrice);
     const stable = String(id);
     const key = crypto.createHash("sha256").update(stable).digest("hex").slice(0, 12);
-    return { id: stable, key, name: String(name), description: String(description), price: Number.isFinite(price) ? price : null, raw: p };
+    return {
+      id: stable,
+      key,
+      name: String(name),
+      description: String(description),
+      price: normalizedPrice.amount,
+      currency: normalizedPrice.currency,
+      priceText: normalizedPrice.text,
+      raw: p,
+    };
   });
 }
 
