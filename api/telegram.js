@@ -123,19 +123,52 @@ async function showCategories(chatId, runtime) {
   });
 }
 
-async function showCategory(chatId, slug, runtime) {
+function productEmoji(product) {
+  const text = `${product?.name || ''} ${product?.description || ''}`;
+  const rules = [
+    [/chatgpt|gpt|codex|openai/i, '🤖'],
+    [/grok|\bai\b|gemini|claude/i, '🧠'],
+    [/netflix|vieon|\btv\b|video|stream/i, '🎬'],
+    [/bank|\bmb\b|payment|pay/i, '💳'],
+    [/vpn/i, '🛡️'],
+    [/music|spotify|بودكاست/i, '🎧'],
+    [/e-?mail|mail/i, '📧'],
+    [/voucher|gift/i, '🎟️'],
+    [/account/i, '👤'],
+  ];
+  const hit = rules.find(([re]) => re.test(text));
+  return hit ? hit[1] : '📦';
+}
+
+function productLabel(product, runtime) {
+  const name = short(String(product?.name || '').replace(/^[^\p{L}\p{N}]+/u, ''), 26);
+  const stars = priceToStars(product.price, runtime);
+  return `${productEmoji(product)} ${name}${stars ? ` — ⭐ ${stars}` : ''}`;
+}
+
+async function showCategory(chatId, slug, runtime, page = 1) {
   const products = await visibleProducts(runtime);
   const group = categoryGroups(products).get(slug);
   if (!group || !group.products.length) return sendMessage(chatId, 'حالياً ما فيه منتجات بهالقسم.');
 
-  const rows = group.products.slice(0, 40).map(product => {
-    const stars = priceToStars(product.price, runtime);
-    const suffix = stars ? ` — ⭐ ${stars}` : '';
-    return [{ text: `${short(product.name, 36)}${suffix}`, callback_data: `p:${product.key}` }];
-  });
+  const configured = Number(runtime?.productsPageSize);
+  const pageSize = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 40) : 8;
+  const totalPages = Math.max(1, Math.ceil(group.products.length / pageSize));
+  const current = Math.min(Math.max(1, Number.parseInt(page, 10) || 1), totalPages);
+  const items = group.products.slice((current - 1) * pageSize, current * pageSize);
+
+  const rows = items.map(product => [{ text: productLabel(product, runtime), callback_data: `p:${product.key}` }]);
+  if (totalPages > 1) {
+    const nav = [];
+    if (current > 1) nav.push({ text: '◀️ السابق', callback_data: `catp:${slug}:${current - 1}` });
+    nav.push({ text: `${current}/${totalPages}`, callback_data: `catp:${slug}:${current}` });
+    if (current < totalPages) nav.push({ text: 'التالي ▶️', callback_data: `catp:${slug}:${current + 1}` });
+    rows.push(nav);
+  }
   rows.push([{ text: '⬅️ رجوع للأقسام', callback_data: 'cats' }]);
 
-  return sendMessage(chatId, `${group.category.icon} ${group.category.label}\nاختر المنتج:`, {
+  const pageInfo = totalPages > 1 ? ` (${current}/${totalPages})` : '';
+  return sendMessage(chatId, `${group.category.icon} ${group.category.label}${pageInfo}\nاختر المنتج:`, {
     reply_markup: { inline_keyboard: rows },
   });
 }
@@ -279,6 +312,11 @@ export default async function handler(req, res) {
       const data = String(query.data || '');
       if (data === 'cats') await showCategories(query.message.chat.id, runtime);
       else if (data.startsWith('cat:')) await showCategory(query.message.chat.id, data.slice(4), runtime);
+      else if (data.startsWith('catp:')) {
+        const rest = data.slice(5);
+        const i = rest.lastIndexOf(':');
+        await showCategory(query.message.chat.id, i < 0 ? rest : rest.slice(0, i), runtime, i < 0 ? 1 : rest.slice(i + 1));
+      }
       else if (data.startsWith('p:')) await showProduct(query.message.chat.id, data.slice(2), runtime);
       else if (data.startsWith('buy:')) await startInvoice(query.message.chat.id, query.from, data.slice(4), runtime);
     }
