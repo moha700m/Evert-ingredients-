@@ -140,10 +140,45 @@ function productEmoji(product) {
   return hit ? hit[1] : '📦';
 }
 
-function productLabel(product, runtime) {
-  const name = short(String(product?.name || '').replace(/^[^\p{L}\p{N}]+/u, ''), 26);
-  const stars = priceToStars(product.price, runtime);
-  return `${productEmoji(product)} ${name}${stars ? ` — ⭐ ${stars}` : ''}`;
+function durationTag(text) {
+  const month = text.match(/(\d+)\s*(?:month|months|mo\b)/i);
+  if (month) return `${month[1]}M`;
+  const day = text.match(/(\d+)\s*(?:day|days|d\b)/i);
+  if (day) return `${day[1]}D`;
+  const year = text.match(/(\d+)\s*(?:year|years|yr\b)/i);
+  if (year) return `${year[1]}Y`;
+  return '';
+}
+
+function compactProductName(product) {
+  const raw = String(product?.name || '').replace(/https?:\/\/\S+/gi, '').replace(/\s+/g, ' ').trim();
+  const lower = raw.toLowerCase();
+  const duration = durationTag(raw);
+
+  const codex = raw.match(/\b(\d+)\s*M\b/i);
+  if (/codex/.test(lower)) return `${codex ? `${codex[1]}M ` : ''}Codex${duration ? ` ${duration}` : ''}`;
+  if (/chat\s*gpt|chatgpt/.test(lower)) return `GPT Plus${duration ? ` ${duration}` : ''}`;
+  if (/\bgrok\b/.test(lower)) return `Grok${duration ? ` ${duration}` : ''}`;
+  if (/vieon/.test(lower)) return `VieON${duration ? ` ${duration}` : ''}`;
+  if (/netflix/.test(lower)) return `Netflix${/4k/i.test(raw) ? ' 4K' : ''}${duration ? ` ${duration}` : ''}`;
+  if (/\bmb\b|mb bank|bank/.test(lower) && /voucher|number|account/.test(lower)) return 'MB Voucher';
+  if (/voucher/.test(lower)) return `Voucher${duration ? ` ${duration}` : ''}`;
+  if (/account/.test(lower)) {
+    const first = raw.replace(/\baccount\b/ig, '').replace(/\b(full|warranty|guarantee|comes? with)\b/ig, '').trim();
+    return short(first, 13);
+  }
+
+  const cleaned = raw
+    .replace(/\b(full warranty|warranty|guarantee|full|comes? with|complete|premium account)\b/ig, '')
+    .replace(/\b(1 day|7 days|30 days)\b/ig, '')
+    .replace(/[-–—|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return short(cleaned || raw, 13);
+}
+
+function productGridLabel(product) {
+  return `${productEmoji(product)} ${compactProductName(product)}`;
 }
 
 async function showCategory(chatId, slug, runtime, page = 1) {
@@ -152,12 +187,15 @@ async function showCategory(chatId, slug, runtime, page = 1) {
   if (!group || !group.products.length) return sendMessage(chatId, 'حالياً ما فيه منتجات بهالقسم.');
 
   const configured = Number(runtime?.productsPageSize);
-  const pageSize = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 40) : 8;
+  const wanted = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 18) : 9;
+  const pageSize = Math.max(6, Math.ceil(wanted / 3) * 3);
   const totalPages = Math.max(1, Math.ceil(group.products.length / pageSize));
   const current = Math.min(Math.max(1, Number.parseInt(page, 10) || 1), totalPages);
   const items = group.products.slice((current - 1) * pageSize, current * pageSize);
 
-  const rows = items.map(product => [{ text: productLabel(product, runtime), callback_data: `p:${product.key}` }]);
+  const productButtons = items.map(product => ({ text: productGridLabel(product), callback_data: `p:${product.key}` }));
+  const rows = chunk(productButtons, 3);
+
   if (totalPages > 1) {
     const nav = [];
     if (current > 1) nav.push({ text: '◀️ السابق', callback_data: `catp:${slug}:${current - 1}` });
