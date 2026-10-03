@@ -1,6 +1,7 @@
 import { cfg } from './config.js';
 
 const API = () => `https://api.telegram.org/bot${cfg.telegramToken()}`;
+const GENERIC_CATEGORY_ICON_ID = '5911200159915581346';
 
 const BRAND_BUTTONS = {
   chatgpt: ['5911484044368945441', 'ChatGPT'],
@@ -38,11 +39,13 @@ const BRAND_BUTTONS = {
 };
 
 export function categoryButton(slug, fallbackLabel) {
-  const otherId = String(process.env.OTHER_ICON_EMOJI_ID || '').trim();
-  const brand = BRAND_BUTTONS[slug] || (slug === 'other' && /^\d+$/.test(otherId) ? [otherId, fallbackLabel] : null);
-  const button = { text: brand ? brand[1] : fallbackLabel, callback_data: `cat:${slug}` };
-  if (brand) button.icon_custom_emoji_id = brand[0];
-  return button;
+  const brand = BRAND_BUTTONS[slug];
+  const [iconId, label] = brand || [GENERIC_CATEGORY_ICON_ID, fallbackLabel];
+  return {
+    text: label,
+    callback_data: `cat:${slug}`,
+    icon_custom_emoji_id: iconId,
+  };
 }
 
 function enhanceBrandButtons(extra) {
@@ -54,8 +57,7 @@ function enhanceBrandButtons(extra) {
     if (!data.startsWith('cat:')) return button;
     const slug = data.slice(4);
     const brand = BRAND_BUTTONS[slug];
-    if (!brand) return button;
-    const [iconId, label] = brand;
+    const [iconId, label] = brand || [GENERIC_CATEGORY_ICON_ID, button.text];
     return { ...button, text: label, icon_custom_emoji_id: iconId };
   }));
 
