@@ -4,9 +4,9 @@ import { fetchProducts, purchaseProduct, canAutoPurchase, canPurchaseWithInput }
 import { getRuntimeConfig } from './_lib/runtime-config.js';
 
 const CATEGORIES = [
+  { slug: 'apple', label: 'Apple', icon: '🍎', re: /apple\s*id|icloud|\bapple\b/i },
   { slug: 'chatgpt', label: 'ChatGPT', icon: '🤖', re: /chatgpt|openai/i },
   { slug: 'google', label: 'Google', icon: '🌈', re: /google one|gemini|google/i },
-  { slug: 'apple', label: 'Apple', icon: '🍎', re: /apple\s*id|icloud|\bapple\b/i },
   { slug: 'capcut', label: 'CapCut', icon: '🎬', re: /capcut/i },
   { slug: 'gmail', label: 'Gmail', icon: '📧', re: /gmail|google mail/i },
   { slug: 'canva', label: 'Canva', icon: '🎨', re: /canva/i },
