@@ -1,0 +1,27 @@
+name: Telegram Emoji Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/emoji-diagnostic.yml'
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call diagnostic endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://evert-ingredients.vercel.app/api/emoji-diagnostic?nonce=diag_20261003_custom_emoji_7fK9sQ2xP4'
+          for i in $(seq 1 12); do
+            code=$(curl -sS --max-time 60 -o result.json -w '%{http_code}' "$URL" || true)
+            echo "HTTP $code"
+            cat result.json 2>/dev/null || true
+            echo
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 8
+          done
+          exit 1
