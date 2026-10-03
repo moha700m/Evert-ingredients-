@@ -14,6 +14,18 @@ function pageSize() {
   return Number.isInteger(n) && n >= 4 && n <= 10 ? n : 8;
 }
 
+function compactDescription(value, max = 220) {
+  const text = String(value || "")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "وصف مختصر غير متوفر.";
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${cut.slice(0, lastSpace > max * 0.7 ? lastSpace : max).trim()}…`;
+}
+
 async function showHome(chatId) {
   return sendMessage(chatId,
     "أهلًا بك 👋\n\nمتجر خدمات رقمية بواجهة عربية. اختر من القائمة:",
@@ -71,10 +83,10 @@ async function showProduct(chatId, key) {
   const priceLine = stars ? `⭐ السعر: ${stars} نجمة` : "السعر غير متاح حاليًا";
   const needsInput = !canAutoPurchase(p);
   const specialLine = needsInput
-    ? "\n\n⚠️ هذا المنتج يحتاج بيانات إضافية قبل التنفيذ، لذلك الشراء الآلي له غير مفعل حاليًا."
+    ? "\n⚠️ يحتاج بيانات إضافية قبل التنفيذ."
     : "";
 
-  const text = `📦 ${ar.nameAr}\n\n${ar.descAr || "لا يوجد وصف."}\n\n${priceLine}${availabilityLine(p)}${specialLine}`;
+  const text = `📦 ${ar.nameAr}\n\n${compactDescription(ar.descAr)}\n\n${priceLine}${availabilityLine(p)}${specialLine}`;
   const keyboard = { inline_keyboard: [] };
 
   const available = p?.availability?.available;
@@ -105,7 +117,7 @@ async function startInvoice(chatId, user, key) {
   return tg("sendInvoice", {
     chat_id: chatId,
     title: ar.nameAr.slice(0, 32) || "منتج رقمي",
-    description: (ar.descAr || "خدمة رقمية").slice(0, 255),
+    description: compactDescription(ar.descAr || "خدمة رقمية", 180),
     payload: `buy:${p.key}:${stars}`,
     currency: "XTR",
     prices: [{ label: ar.nameAr.slice(0, 32) || "المنتج", amount: stars }],
