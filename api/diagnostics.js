@@ -2,6 +2,22 @@ import { cfg } from "./_lib/config.js";
 import { tg } from "./_lib/telegram.js";
 import { fetchRawProducts, normalizeProducts } from "./_lib/products.js";
 
+function describeShape(value, depth = 0) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) {
+    if (depth >= 2) return { type: "array" };
+    return { type: "array", item: value.length ? describeShape(value[0], depth + 1) : "empty" };
+  }
+  if (typeof value === "object") {
+    if (depth >= 2) return { type: "object", keys: Object.keys(value) };
+    return {
+      type: "object",
+      fields: Object.fromEntries(Object.entries(value).map(([key, child]) => [key, describeShape(child, depth + 1)])),
+    };
+  }
+  return typeof value;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "method_not_allowed" });
 
@@ -46,6 +62,9 @@ export default async function handler(req, res) {
       result.canboso.stringKeys = Object.entries(first)
         .filter(([, value]) => typeof value === "string")
         .map(([key]) => key);
+      result.canboso.priceShape = describeShape(first.price);
+      result.canboso.availabilityShape = describeShape(first.availability);
+      result.canboso.promotionsShape = describeShape(first.promotions);
     }
   } catch (e) {
     result.canboso.error = e.message;
