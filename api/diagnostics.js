@@ -18,6 +18,33 @@ function describeShape(value, depth = 0) {
   return typeof value;
 }
 
+async function ensureOwnWebhook(req) {
+  const configured = cfg.publicBaseUrl();
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const baseUrl = configured || `${proto}://${host}`;
+  const desiredUrl = `${baseUrl.replace(/\/$/, "")}/api/telegram`;
+  const current = await tg("getWebhookInfo");
+
+  if (current?.url !== desiredUrl) {
+    await tg("setWebhook", {
+      url: desiredUrl,
+      secret_token: cfg.webhookSecret(),
+      allowed_updates: ["message", "callback_query", "pre_checkout_query"],
+      drop_pending_updates: true,
+    });
+    await tg("setMyCommands", {
+      commands: [
+        { command: "start", description: "القائمة الرئيسية" },
+        { command: "products", description: "عرض المنتجات" },
+        { command: "help", description: "المساعدة" },
+      ],
+    });
+  }
+
+  return tg("getWebhookInfo");
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ ok: false, error: "method_not_allowed" });
 
@@ -33,7 +60,7 @@ export default async function handler(req, res) {
     cfg.webhookSecret();
     result.telegram.configured = true;
     const me = await tg("getMe");
-    const webhook = await tg("getWebhookInfo");
+    const webhook = await ensureOwnWebhook(req);
     result.telegram.reachable = true;
     result.telegram.bot = me?.username || null;
     result.telegram.webhookConfigured = Boolean(webhook?.url);
@@ -57,24 +84,11 @@ export default async function handler(req, res) {
       price: p.price,
       currency: p.currency,
       priceText: p.priceText,
-      supplierPrice: p.raw?.price && typeof p.raw.price === "object"
-        ? {
-            amount: p.raw.price.amount ?? null,
-            currency: p.raw.price.currency ?? null,
-            text: p.raw.price.text ?? null,
-          }
-        : p.raw?.price ?? null,
     }));
 
     const first = products[0]?.raw;
     if (first && typeof first === "object" && !Array.isArray(first)) {
       result.canboso.schemaKeys = Object.keys(first);
-      result.canboso.numericKeys = Object.entries(first)
-        .filter(([, value]) => typeof value === "number")
-        .map(([key]) => key);
-      result.canboso.stringKeys = Object.entries(first)
-        .filter(([, value]) => typeof value === "string")
-        .map(([key]) => key);
       result.canboso.priceShape = describeShape(first.price);
       result.canboso.availabilityShape = describeShape(first.availability);
       result.canboso.promotionsShape = describeShape(first.promotions);
