@@ -7,7 +7,7 @@ process.env.CANBOSO_AUTH_HEADER = 'x-buyer-key';
 process.env.CANBOSO_PRODUCTS_PATH = '/products';
 process.env.CANBOSO_PURCHASE_PATH = '/purchase';
 
-const { fetchRawProducts, normalizeProducts, purchaseProduct, canPurchaseWithInput } = await import('../api/_lib/products.js');
+const { fetchRawProducts, normalizeProducts, purchaseProduct, canPurchaseWithInput, canAutoPurchase } = await import('../api/_lib/products.js');
 
 afterEach(() => { globalThis.fetch = undefined; });
 
@@ -22,6 +22,30 @@ test('normalizes stable supplier IDs, numeric stock, and unknown stock', () => {
   assert.equal(products[0].availability.available, 2);
   assert.notEqual(typeof products[1].availability.available, 'number');
   assert.equal(products[1].price, 4.5);
+  const [missingId] = normalizeProducts({ products: [{ name: 'Visible but non-purchasable', price: 5 }] });
+  assert.equal(missingId.id, null);
+  assert.equal(missingId.sourceIdValid, false);
+  const [malformedId] = normalizeProducts({ products: [{ productId: {}, name: 'Visible malformed ID', price: 5 }] });
+  assert.equal(malformedId.id, null);
+  assert.equal(malformedId.sourceIdValid, false);
+  const [badNumeric] = normalizeProducts({ products: [{ productId: 'bad', name: 'Bad stock', price: 'Out of stock: 0', availability: '2 of 10 left' }] });
+  assert.equal(badNumeric.price, null);
+  assert.equal(badNumeric.availability.available, undefined);
+});
+
+test('an ambiguous first POST remains ambiguous when its exact retry is rejected', async () => {
+  const product = normalizeProducts({ products: [{ productId: 'retry-id', name: 'Account', price: 2 }] })[0];
+  let call = 0;
+  globalThis.fetch = async () => {
+    call += 1;
+    return new Response(JSON.stringify({ error: 'provider response' }), { status: call === 1 ? 503 : 429 });
+  };
+  await assert.rejects(purchaseProduct(product, { id: 9 }, 'tg-charge-ambiguous'), error => {
+    assert.equal(call, 2);
+    assert.equal(error.status, 429);
+    assert.equal(error.definitive, false);
+    return true;
+  });
 });
 
 test('follows all supplier pages beyond the old twenty-page ceiling', async () => {
@@ -39,6 +63,54 @@ test('follows all supplier pages beyond the old twenty-page ceiling', async () =
   assert.equal(calls, 21);
   assert.equal(response.products.length, 21);
   assert.equal(response.products.at(-1).productId, 'supplier-21');
+});
+
+test('follows has_next pagination without a total page count', async () => {
+  let calls = 0;
+  globalThis.fetch = async url => {
+    calls += 1;
+    const page = Number(new URL(url).searchParams.get('page') || 1);
+    return new Response(JSON.stringify({
+      products: [{ productId: `cursor-${page}`, name: `Product ${page}`, price: 1 }],
+      pagination: { has_next: page < 3 },
+    }), { status: 200 });
+  };
+  const response = await fetchRawProducts();
+  assert.equal(calls, 3);
+  assert.equal(response.products.length, 3);
+});
+
+test('quantity metadata and false optional requirements do not block direct products', () => {
+  const [product] = normalizeProducts({ products: [{
+    productId: 'quantity-one',
+    name: 'Account',
+    productType: 'account',
+    price: 2,
+    purchaseRequirements: { quantityFixed: 1, customerEmail: false },
+  }] });
+  assert.equal(product.requiresInput, false);
+  assert.equal(canAutoPurchase(product), true);
+});
+
+test('normalizes JSON and array customer requirements without guessing other fields', () => {
+  const products = normalizeProducts({ products: [
+    { productId: 'json-req', name: 'YouTube Slot', productType: 'slot', price: 2, purchaseRequirements: '{"customerEmail":true,"quantityFixed":1}' },
+    { productId: 'array-req', name: 'YouTube Slot', productType: 'slot', price: 2, purchaseRequirements: ['customerEmail'] },
+    { productId: 'other-req', name: 'Manual', productType: 'account', price: 2, purchaseRequirements: ['customerPassword'] },
+    { productId: 'unknown-object-req', name: 'Manual', productType: 'account', price: 2, purchaseRequirements: [{}] },
+    { productId: 'fixed-three', name: 'Bundle', productType: 'account', price: 2, purchaseRequirements: { quantityFixed: 3 } },
+    { productId: 'false-string-req', name: 'Account', productType: 'account', price: 2, purchaseRequirements: 'false' },
+    { productId: 'null-string-req', name: 'Account', productType: 'account', price: 2, purchaseRequirements: 'null' },
+  ] });
+  assert.equal(canPurchaseWithInput(products[0]), true);
+  assert.equal(canPurchaseWithInput(products[1]), true);
+  assert.equal(canPurchaseWithInput(products[2]), false);
+  assert.equal(canAutoPurchase(products[2]), false);
+  assert.equal(products[3].requiresInput, true);
+  assert.equal(canAutoPurchase(products[3]), false);
+  assert.equal(canAutoPurchase(products[4]), false);
+  assert.equal(canAutoPurchase(products[5]), true);
+  assert.equal(canAutoPurchase(products[6]), true);
 });
 
 test('rejects HTTP 200 success:false without retaining raw supplier content', async () => {

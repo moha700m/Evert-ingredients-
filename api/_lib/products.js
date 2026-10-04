@@ -116,8 +116,10 @@ async function upstream(path, init = {}) {
 function parseNumeric(value) {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
-  const cleaned = value.trim().replace(/[^0-9.-]/g, "");
-  if (!cleaned || !/[0-9]/.test(cleaned)) return null;
+  const pattern = /^(?:[A-Za-z]{3}\s*)?[\p{Sc}\s]*([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)[\p{Sc}\s]*(?:[A-Za-z]{3})?$/u;
+  const match = value.trim().match(pattern);
+  if (!match) return null;
+  const cleaned = match[1].replace(/,/g, "");
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -164,6 +166,19 @@ function hasRequirements(value) {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "object") return Object.keys(value).length > 0;
   return Boolean(value);
+}
+
+function normalizeRequirements(value) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed === null || parsed === false) return null;
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {}
+  if (/^customeremail$/i.test(trimmed)) return { customerEmail: true };
+  return value;
 }
 
 function addBuyerKeyAndParams(path, params = {}) {
@@ -246,6 +261,11 @@ export async function fetchRawProducts({ timeoutMs = 12000 } = {}) {
       continue;
     }
     if (pagination.hasNext === false) break;
+    if (pagination.hasNext === true) {
+      const requestedPage = parseNumeric(new URL(nextPath, `${cfg.canbosoBaseUrl()}/`).searchParams.get("page")) || pagination.current || 1;
+      nextPath = addBuyerKeyAndParams(cfg.productsPath(), { page: requestedPage + 1 });
+      continue;
+    }
     break;
   }
 
@@ -256,7 +276,7 @@ export function normalizeProducts(raw) {
   const arr = findProductsArray(raw) || [];
   const normalized = arr.filter(x => x && typeof x === "object" && !Array.isArray(x)).map((p, index) => {
     const rawId = getFirst(p, cfg.idKeys());
-    const sourceIdValid = rawId !== undefined && String(rawId).trim() !== "";
+    const sourceIdValid = (typeof rawId === "string" && rawId.trim() !== "") || (typeof rawId === "number" && Number.isFinite(rawId));
     const fallbackHash = crypto.createHash("sha256").update(JSON.stringify(p)).digest("hex").slice(0, 16);
     const stable = sourceIdValid ? String(rawId) : `missing-id-${fallbackHash}`;
     const rawName = getFirst(p, cfg.nameKeys());
@@ -264,18 +284,18 @@ export function normalizeProducts(raw) {
     const description = getFirst(p, cfg.descKeys()) ?? "";
     const rawPrice = getFirst(p, cfg.priceKeys());
     const normalizedPrice = normalizePrice(rawPrice);
-    const requirements = p.purchaseRequirements ?? p.purchase_requirements ?? null;
+    const requirements = normalizeRequirements(p.purchaseRequirements ?? p.purchase_requirements ?? null);
     const key = crypto.createHash("sha256").update(stable).digest("hex").slice(0, 12);
 
     return {
-      id: stable,
+      id: sourceIdValid ? stable : null,
       sourceIdValid,
       key,
       name,
       description: String(description),
       productType: String(p.productType ?? p.product_type ?? ""),
       purchaseRequirements: requirements,
-      requiresInput: hasRequirements(requirements),
+      requiresInput: requirementsNeedInput(requirements),
       availability: normalizeAvailability(p.availability ?? p.stock ?? null),
       price: normalizedPrice.amount,
       currency: normalizedPrice.currency,
@@ -310,12 +330,40 @@ export async function arabizeProduct(p) {
 }
 
 export function purchaseInputFields(product) {
-  const requirements = product?.purchaseRequirements;
-  if (!requirements || typeof requirements !== "object" || Array.isArray(requirements)) return [];
-  const metadata = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity"]);
+  let requirements = product?.purchaseRequirements;
+  if (typeof requirements === "string") {
+    try { requirements = JSON.parse(requirements); }
+    catch { return requirements.trim() ? ["unsupportedRequirement"] : []; }
+  }
+  if (Array.isArray(requirements)) {
+    return requirements.filter(item => item?.required !== false).map(item => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") return item.name ?? item.field ?? item.key ?? item.id ?? "unsupportedRequirement";
+      return "unsupportedRequirement";
+    }).filter(Boolean).map(String).filter(field => !["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"].includes(field));
+  }
+  if (!requirements || typeof requirements !== "object") return [];
+  const metadata = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"]);
   return Object.entries(requirements)
     .filter(([key, value]) => !metadata.has(key) && (value === true || (value && typeof value === "object" && value.required === true)))
     .map(([key]) => key);
+}
+
+function requirementsNeedInput(value) {
+  if (value == null || value === false) return false;
+  const metadata = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"]);
+  if (Array.isArray(value)) {
+    return value.some(item => {
+      const field = typeof item === "string" ? item : item?.name ?? item?.field ?? item?.key ?? item?.id;
+      if (!field) return true;
+      return !metadata.has(String(field)) && item?.required !== false;
+    });
+  }
+  if (typeof value !== "object") return hasRequirements(value);
+  return Object.entries(value).some(([key, requirement]) => {
+    if (metadata.has(key) || requirement == null || requirement === false || requirement === "") return false;
+    return requirement === true || (typeof requirement === "object" ? requirement.required !== false : Boolean(requirement));
+  });
 }
 
 export function quantityFixed(product) {
@@ -333,6 +381,8 @@ export function canAutoPurchase(product) {
   if (!product || !product.sourceIdValid) return false;
   if (product.id === "slot_chatgpt_business") return false;
   if (["slot", "upgrade_account"].includes(String(product.productType || "").toLowerCase())) return false;
+  const fixed = quantityFixed(product);
+  if (fixed !== null && fixed !== 1) return false;
   return !product.requiresInput;
 }
 
@@ -400,13 +450,18 @@ export async function purchaseProduct(product, user, idempotencyKey = "", inputs
     return result;
   } catch (error) {
     if (error.status !== 0 && error.status < 500) throw error;
-    const result = await upstream(cfg.purchasePath(), request);
-    if (result?.success !== true) {
-      const retryError = new Error("Canboso returned an unconfirmed purchase response");
-      retryError.status = 0;
-      retryError.code = "unconfirmed_purchase_response";
+    try {
+      const result = await upstream(cfg.purchasePath(), request);
+      if (result?.success !== true) {
+        const retryError = new Error("Canboso returned an unconfirmed purchase response");
+        retryError.status = 0;
+        retryError.code = "unconfirmed_purchase_response";
+        throw retryError;
+      }
+      return result;
+    } catch (retryError) {
+      retryError.definitive = false;
       throw retryError;
     }
-    return result;
   }
 }
