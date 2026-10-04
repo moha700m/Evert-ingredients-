@@ -82,28 +82,34 @@ function upstreamUrl(path) {
 async function upstream(path, init = {}) {
   const url = upstreamUrl(path);
   let last;
+  const deadline = Date.now() + (init.timeoutMs || 6000);
+  const { timeoutMs: _timeoutMs, ...requestInit } = init;
   for (const auth of authCandidates()) {
-    const r = await fetch(url, {
-      ...init,
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        ...auth,
-        ...(init.headers || {}),
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-    const text = await r.text();
-    let data;
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-    if (r.ok) return data;
-    last = { status: r.status, data };
-    const retryAuth = [401, 403].includes(r.status) || isMissingApiKeyError(r.status, data);
-    if (!retryAuth) break;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      const r = await fetch(url, {
+        ...requestInit,
+        headers: { accept: "application/json", "content-type": "application/json", ...auth, ...(requestInit.headers || {}) },
+        signal: AbortSignal.timeout(Math.min(remaining, 6000)),
+      });
+      const text = await r.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+      if (r.ok && data?.success !== false) return data;
+      const definitive = (r.ok && data?.success === false) || (r.status >= 400 && r.status < 500 && r.status !== 409);
+      last = { status: r.status, code: definitive ? "supplier_rejected" : "upstream_error", definitive };
+      const retryAuth = [401, 403].includes(r.status) || isMissingApiKeyError(r.status, data);
+      if (!retryAuth) break;
+    } catch {
+      last = { status: 0, code: "upstream_timeout_or_network_error" };
+      break;
+    }
   }
-  const error = new Error(`Canboso API error ${last?.status || "unknown"}: ${JSON.stringify(last?.data || {})}`);
+  const error = new Error(`Canboso API error ${last?.status || "unknown"}: ${last?.code || "request_failed"}`);
   error.status = last?.status || 0;
-  error.data = last?.data || {};
+  error.code = last?.code || "request_failed";
+  error.definitive = Boolean(last?.definitive);
   throw error;
 }
 
@@ -202,23 +208,28 @@ function sameCanbosoOrigin(url) {
   }
 }
 
-export async function fetchRawProducts() {
+export async function fetchRawProducts({ timeoutMs = 12000 } = {}) {
   const collected = [];
   let nextPath = addBuyerKeyAndParams(cfg.productsPath());
   const seen = new Set();
+  const deadline = Date.now() + timeoutMs;
 
-  for (let page = 0; page < 20 && nextPath; page += 1) {
-    if (seen.has(nextPath)) break;
+  while (nextPath) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Canboso catalog pagination exceeded its time budget");
+    if (seen.has(nextPath)) throw new Error("Canboso pagination repeated a page");
     seen.add(nextPath);
 
-    const raw = await upstream(nextPath, { method: "GET" });
-    const items = findProductsArray(raw) || [];
+    const raw = await upstream(nextPath, { method: "GET", timeoutMs: remaining });
+    const items = findProductsArray(raw);
+    if (!items) throw new Error("Canboso products response did not contain a product list");
     collected.push(...items);
 
     const pagination = paginationInfo(raw);
     if (!pagination) break;
 
-    if (pagination.nextUrl && sameCanbosoOrigin(pagination.nextUrl)) {
+    if (pagination.nextUrl) {
+      if (!sameCanbosoOrigin(pagination.nextUrl)) throw new Error("Canboso pagination URL changed origin");
       nextPath = addBuyerKeyAndParams(pagination.nextUrl);
       continue;
     }
@@ -284,8 +295,13 @@ export function normalizeProducts(raw) {
   return unique;
 }
 
-export async function fetchProducts() {
-  return normalizeProducts(await fetchRawProducts());
+let productCache = { at: 0, products: null };
+
+export async function fetchProducts({ fresh = false } = {}) {
+  if (!fresh && productCache.products && Date.now() - productCache.at < 5000) return productCache.products;
+  const products = normalizeProducts(await fetchRawProducts({ timeoutMs: fresh ? 6000 : 12000 }));
+  productCache = { at: Date.now(), products };
+  return products;
 }
 
 export async function arabizeProduct(p) {
@@ -300,6 +316,11 @@ export function purchaseInputFields(product) {
   return Object.entries(requirements)
     .filter(([key, value]) => !metadata.has(key) && (value === true || (value && typeof value === "object" && value.required === true)))
     .map(([key]) => key);
+}
+
+export function quantityFixed(product) {
+  const value = Number(product?.purchaseRequirements?.quantityFixed);
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 export function canPurchaseWithInput(product) {
@@ -364,28 +385,28 @@ export async function purchaseProduct(product, user, idempotencyKey = "", inputs
   baseBody.quantity = 1;
 
   const customerEmail = String(inputs.customerEmail ?? "").trim();
-  const variants = customerEmail
-    ? [
-        { ...baseBody, customer_email: customerEmail },
-        { ...baseBody, customerEmail },
-        { ...baseBody, email: customerEmail },
-      ]
-    : [baseBody];
-
-  let lastError;
-  for (let index = 0; index < variants.length; index += 1) {
-    try {
-      return await upstream(cfg.purchasePath(), {
-        method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey || `telegram-${user?.id || "unknown"}-${product.key}-${Date.now()}` },
-        body: JSON.stringify(variants[index]),
-      });
-    } catch (error) {
-      lastError = error;
-      const mayTryFieldAlias = [400, 422].includes(Number(error.status));
-      if (!mayTryFieldAlias || index === variants.length - 1) throw error;
+  if (customerEmail) baseBody.customer_email = customerEmail;
+  const key = idempotencyKey || `telegram-${user?.id || "unknown"}-${product.key}-${Date.now()}`;
+  if (Buffer.byteLength(key, "utf8") < 8 || Buffer.byteLength(key, "utf8") > 128) throw new Error("Invalid supplier idempotency key length");
+  const request = { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(baseBody), timeoutMs: 3000 };
+  try {
+    const result = await upstream(cfg.purchasePath(), request);
+    if (result?.success !== true) {
+      const error = new Error("Canboso returned an unconfirmed purchase response");
+      error.status = 0;
+      error.code = "unconfirmed_purchase_response";
+      throw error;
     }
+    return result;
+  } catch (error) {
+    if (error.status !== 0 && error.status < 500) throw error;
+    const result = await upstream(cfg.purchasePath(), request);
+    if (result?.success !== true) {
+      const retryError = new Error("Canboso returned an unconfirmed purchase response");
+      retryError.status = 0;
+      retryError.code = "unconfirmed_purchase_response";
+      throw retryError;
+    }
+    return result;
   }
-
-  throw lastError || new Error("تعذر تنفيذ الطلب");
 }
