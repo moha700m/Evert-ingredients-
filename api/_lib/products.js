@@ -97,7 +97,7 @@ async function upstream(path, init = {}) {
       let data;
       try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
       if (r.ok && data?.success !== false) return data;
-      const definitive = (r.ok && data?.success === false) || (r.status >= 400 && r.status < 500 && r.status !== 409);
+      const definitive = (r.ok && data?.success === false) || (r.status >= 400 && r.status < 500 && ![409, 429].includes(r.status));
       last = { status: r.status, code: definitive ? "supplier_rejected" : "upstream_error", definitive };
       const retryAuth = [401, 403].includes(r.status) || isMissingApiKeyError(r.status, data);
       if (!retryAuth) break;
@@ -155,17 +155,6 @@ function normalizeAvailability(raw) {
     if (fallback !== null) out.available = fallback;
   }
   return out;
-}
-
-function hasRequirements(value) {
-  if (value == null || value === false) return false;
-  if (typeof value === "string") {
-    const clean = value.trim();
-    return clean !== "" && clean !== "[]" && clean !== "{}" && clean.toLowerCase() !== "null";
-  }
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "object") return Object.keys(value).length > 0;
-  return Boolean(value);
 }
 
 function normalizeRequirements(value) {
@@ -329,6 +318,15 @@ export async function arabizeProduct(p) {
   return { ...p, nameAr, descAr };
 }
 
+const REQUIREMENT_METADATA = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"]);
+
+function requirementIsRequired(value) {
+  if (value == null || value === false || value === "") return false;
+  if (value === true) return true;
+  if (typeof value === "object") return value.required !== false;
+  return Boolean(value);
+}
+
 export function purchaseInputFields(product) {
   let requirements = product?.purchaseRequirements;
   if (typeof requirements === "string") {
@@ -336,34 +334,21 @@ export function purchaseInputFields(product) {
     catch { return requirements.trim() ? ["unsupportedRequirement"] : []; }
   }
   if (Array.isArray(requirements)) {
-    return requirements.filter(item => item?.required !== false).map(item => {
-      if (typeof item === "string") return item;
-      if (item && typeof item === "object") return item.name ?? item.field ?? item.key ?? item.id ?? "unsupportedRequirement";
-      return "unsupportedRequirement";
-    }).filter(Boolean).map(String).filter(field => !["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"].includes(field));
+    return requirements.filter(requirementIsRequired).map(item => {
+      const field = typeof item === "string" ? item : item?.name ?? item?.field ?? item?.key ?? item?.id;
+      return field == null || field === "" ? "unsupportedRequirement" : String(field);
+    }).filter(field => !REQUIREMENT_METADATA.has(field));
   }
-  if (!requirements || typeof requirements !== "object") return [];
-  const metadata = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"]);
-  return Object.entries(requirements)
-    .filter(([key, value]) => !metadata.has(key) && (value === true || (value && typeof value === "object" && value.required === true)))
-    .map(([key]) => key);
+  if (requirements && typeof requirements === "object") {
+    return Object.entries(requirements)
+      .filter(([key, value]) => !REQUIREMENT_METADATA.has(key) && requirementIsRequired(value))
+      .map(([key]) => key);
+  }
+  return requirementIsRequired(requirements) ? ["unsupportedRequirement"] : [];
 }
 
 function requirementsNeedInput(value) {
-  if (value == null || value === false) return false;
-  const metadata = new Set(["quantityFixed", "quantityMin", "quantityMax", "quantity", "minQuantity", "maxQuantity", "allowedMonths"]);
-  if (Array.isArray(value)) {
-    return value.some(item => {
-      const field = typeof item === "string" ? item : item?.name ?? item?.field ?? item?.key ?? item?.id;
-      if (!field) return true;
-      return !metadata.has(String(field)) && item?.required !== false;
-    });
-  }
-  if (typeof value !== "object") return hasRequirements(value);
-  return Object.entries(value).some(([key, requirement]) => {
-    if (metadata.has(key) || requirement == null || requirement === false || requirement === "") return false;
-    return requirement === true || (typeof requirement === "object" ? requirement.required !== false : Boolean(requirement));
-  });
+  return purchaseInputFields({ purchaseRequirements: value }).length > 0;
 }
 
 export function quantityFixed(product) {
@@ -373,6 +358,8 @@ export function quantityFixed(product) {
 
 export function canPurchaseWithInput(product) {
   if (!product || !product.sourceIdValid) return false;
+  const fixed = quantityFixed(product);
+  if (fixed !== null && fixed !== 1) return false;
   const fields = purchaseInputFields(product);
   return fields.length > 0 && fields.every(field => field === "customerEmail");
 }

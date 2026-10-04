@@ -48,6 +48,16 @@ test('an ambiguous first POST remains ambiguous when its exact retry is rejected
   });
 });
 
+test('an initial supplier rate limit is ambiguous and must not be refunded', async () => {
+  const product = normalizeProducts({ products: [{ productId: 'rate-limited', name: 'Account', price: 2 }] })[0];
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'rate limited' }), { status: 429 });
+  await assert.rejects(purchaseProduct(product, { id: 9 }, 'tg-charge-rate-limit'), error => {
+    assert.equal(error.status, 429);
+    assert.equal(error.definitive, false);
+    return true;
+  });
+});
+
 test('follows all supplier pages beyond the old twenty-page ceiling', async () => {
   let calls = 0;
   globalThis.fetch = async url => {
@@ -111,6 +121,21 @@ test('normalizes JSON and array customer requirements without guessing other fie
   assert.equal(canAutoPurchase(products[4]), false);
   assert.equal(canAutoPurchase(products[5]), true);
   assert.equal(canAutoPurchase(products[6]), true);
+});
+
+test('keeps unsupported required input and non-unit quantities out of automatic email flow', () => {
+  const products = normalizeProducts({ products: [
+    { productId: 'email-qty-two', name: 'Email slot', productType: 'slot', price: 2, purchaseRequirements: { customerEmail: true, quantityFixed: 2 } },
+    { productId: 'email-password', name: 'Email and password', productType: 'slot', price: 2, purchaseRequirements: { customerEmail: true, password: 'required' } },
+    { productId: 'email-password-object', name: 'Email and password', productType: 'slot', price: 2, purchaseRequirements: { customerEmail: true, password: { type: 'password' } } },
+    { productId: 'email-password-array', name: 'Email and password', productType: 'slot', price: 2, purchaseRequirements: ['customerEmail', 'password'] },
+  ] });
+
+  for (const product of products) {
+    assert.equal(product.requiresInput, true);
+    assert.equal(canPurchaseWithInput(product), false);
+    assert.equal(canAutoPurchase(product), false);
+  }
 });
 
 test('rejects HTTP 200 success:false without retaining raw supplier content', async () => {
