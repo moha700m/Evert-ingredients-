@@ -3,6 +3,7 @@ import { cfg } from './config.js';
 const API = () => `https://api.telegram.org/bot${cfg.telegramToken()}`;
 
 const CATEGORY_EMOJI = {
+  apple: '🍎',
   chatgpt: '🤖',
   google: '🌈',
   capcut: '🎬',
@@ -46,15 +47,19 @@ export function categoryButton(slug, fallbackLabel) {
   };
 }
 
-export async function tg(method, body = {}) {
+export async function tg(method, body = {}, { timeoutMs = 4000 } = {}) {
   const r = await fetch(`${API()}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok || !data.ok) {
-    throw new Error(`Telegram ${method} failed: ${data.description || r.status}`);
+    const error = new Error(`Telegram ${method} failed`);
+    error.status = r.status;
+    error.code = Number(data.error_code) || 0;
+    throw error;
   }
   return data.result;
 }

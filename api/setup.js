@@ -2,8 +2,10 @@ import { cfg } from './_lib/config.js';
 import { tg } from './_lib/telegram.js';
 
 export default async function handler(req, res) {
+  if (req.method !== 'GET') return res.status(405).json({ ok: false, error: 'method_not_allowed' });
   try {
-    if (req.query?.secret !== cfg.setupSecret()) return res.status(401).json({ ok: false, error: 'unauthorized' });
+    const setupSecret = cfg.setupSecret();
+    if (!setupSecret || req.query?.secret !== setupSecret) return res.status(401).json({ ok: false, error: 'unauthorized' });
     const me = await tg('getMe');
     const configured = cfg.publicBaseUrl();
     const proto = req.headers['x-forwarded-proto'] || 'https';
@@ -16,7 +18,7 @@ export default async function handler(req, res) {
       url: webhookUrl,
       secret_token: cfg.webhookSecret(),
       allowed_updates: ['message', 'callback_query', 'pre_checkout_query'],
-      drop_pending_updates: true,
+      drop_pending_updates: false,
     });
 
     await tg('setMyCommands', {
@@ -27,16 +29,10 @@ export default async function handler(req, res) {
       ],
     });
 
-    await tg('setChatMenuButton', {
-      menu_button: {
-        type: 'web_app',
-        text: '🛍 المتجر',
-        web_app: { url: root },
-      },
-    });
+    await tg('setChatMenuButton', { menu_button: { type: 'default' } });
 
     res.status(200).json({ ok: true, bot: me.username, webhook: webhookUrl, store: root, setWebhook: result });
   } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({ ok: false, error: 'setup_failed' });
   }
 }

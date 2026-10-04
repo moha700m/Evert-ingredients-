@@ -27,7 +27,7 @@ async function canbosoBalance() {
     signal: AbortSignal.timeout(12000),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok || data?.success === false) throw new Error(data?.message || `Canboso balance failed: ${r.status}`);
+  if (!r.ok || data?.success === false) throw new Error(`Canboso balance failed: ${r.status}`);
   return {
     walletCurrency: data.walletCurrency || null,
     balance: data.balance ?? null,
@@ -181,7 +181,7 @@ export default async function handler(req, res) {
 
     return res.status(405).json({ ok: false, error: 'method_not_allowed' });
   } catch (error) {
-    console.error('admin_api_error', error);
+    console.error('admin_api_error', error?.name || 'Error');
     return res.status(500).json({ ok: false, error: error.message });
   }
 }

@@ -1,25 +1,24 @@
 import { cfg } from './_lib/config.js';
 import { tg } from './_lib/telegram.js';
 
-function requestBaseUrl(req) {
-  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
-  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
-  if (!host) throw new Error('Missing request host');
-  return `${proto}://${host}`.replace(/\/$/, '');
-}
-
 export default async function handler(req, res) {
   try {
-    const root = requestBaseUrl(req);
-    const webhookUrl = `${root}/api/telegram`;
+    const repair = req.query?.repair === '1';
+    if (repair) {
+      const setupSecret = cfg.setupSecret();
+      if (!setupSecret || req.query?.secret !== setupSecret) return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const configured = cfg.publicBaseUrl();
+    if (repair && !configured) return res.status(503).json({ ok: false, error: 'public_base_url_not_configured' });
+    const webhookUrl = configured ? `${configured}/api/telegram` : '';
     const me = await tg('getMe');
     const before = await tg('getWebhookInfo');
 
-    const wrongUrl = String(before?.url || '') !== webhookUrl;
+    const wrongUrl = Boolean(webhookUrl) && String(before?.url || '') !== webhookUrl;
     const telegramReportedError = Boolean(before?.last_error_message);
     let repaired = false;
 
-    if (wrongUrl || telegramReportedError || req.query?.repair === '1') {
+    if (repair && (wrongUrl || telegramReportedError || req.query?.force === '1')) {
       await tg('setWebhook', {
         url: webhookUrl,
         secret_token: cfg.webhookSecret(),
@@ -29,13 +28,15 @@ export default async function handler(req, res) {
       repaired = true;
     }
 
-    const after = await tg('getWebhookInfo');
+    const after = repaired ? await tg('getWebhookInfo') : before;
     const result = {
       ok: true,
       service: 'arabic-telegram-store',
       bot: String(me?.username || ''),
       webhook: {
         url: String(after?.url || ''),
+        expectedUrl: webhookUrl || null,
+        matchesProductionUrl: webhookUrl ? String(after?.url || '') === webhookUrl : null,
         pendingUpdates: Number(after?.pending_update_count || 0),
         lastErrorDate: after?.last_error_date || null,
         lastErrorMessage: String(after?.last_error_message || ''),
@@ -58,11 +59,10 @@ export default async function handler(req, res) {
 
     return res.status(200).json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown_error';
     if (req.query?.text === '1') {
       res.setHeader('content-type', 'text/plain; charset=utf-8');
-      return res.status(500).send(`ok=false\nerror=${message}`);
+      return res.status(500).send('ok=false\nerror=health_check_failed');
     }
-    return res.status(500).json({ ok: false, error: message });
+    return res.status(500).json({ ok: false, error: 'health_check_failed' });
   }
 }
