@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { cfg } from './_lib/config.js';
 import { tg, sendMessage, sendLongMessage, answerCallbackQuery, categoryButton } from './_lib/telegram.js';
 import { fetchProducts, purchaseProduct, canAutoPurchase, canPurchaseWithInput } from './_lib/products.js';
@@ -46,16 +47,16 @@ function livePurchases(runtime) {
 function priceToStars(price, runtime) {
   if (!Number.isFinite(price) || price < 0) return null;
   const rate = Number(runtime?.starRate) > 0 ? Number(runtime.starRate) : cfg.starRate();
-  const markup = Number.isFinite(Number(runtime?.markupPercent)) ? Number(runtime.markupPercent) : cfg.markup();
+  const markup = runtime?.markupPercent != null && Number.isFinite(Number(runtime.markupPercent)) ? Number(runtime.markupPercent) : cfg.markup();
   return Math.max(1, Math.ceil(price * rate * (1 + markup / 100)));
 }
 
-async function visibleProducts() {
-  return fetchProducts();
+async function visibleProducts({ fresh = false } = {}) {
+  return fetchProducts({ fresh });
 }
 
-async function findProduct(key, runtime) {
-  return (await visibleProducts(runtime)).find(product => product.key === key) || null;
+async function findProduct(key, runtime, { fresh = false } = {}) {
+  return (await visibleProducts({ fresh })).find(product => product.key === key) || null;
 }
 
 function short(value, max = 34) {
@@ -65,14 +66,23 @@ function short(value, max = 34) {
   return `${text.slice(0, max - 1).trim()}…`;
 }
 
-function detailText(value, max = 700) {
+function supplierPriceFingerprint(product) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify([product.price, product.currency || '']))
+    .digest('hex')
+    .slice(0, 6);
+}
+
+function detailText(value) {
   const text = String(value || '')
     .replace(/\r/g, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  if (!text) return '';
-  return text.length <= max ? text : `${text.slice(0, max - 1).trim()}…`;
+  return text;
 }
 
 function requirementSummary(value) {
@@ -148,9 +158,9 @@ function chunk(items, size) {
 function bottomKeyboard() {
   return {
     keyboard: [
-      [{ text: '🛍 Products' }, { text: '💬 Support' }],
-      [{ text: '👛 Wallet' }, { text: '🔗 API' }],
-      [{ text: '🛡 Warranty' }],
+      [{ text: '🛍 المنتجات' }, { text: '💬 الدعم' }],
+      [{ text: '👛 المحفظة' }, { text: '🔗 API' }],
+      [{ text: '🛡 الضمان' }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -228,12 +238,12 @@ function compactProductName(product) {
     return trimLabel(`${quota ? `${quota[1]}M ` : ''}Codex${restDuration ? ` ${restDuration}` : ''}`);
   }
   if (/chat\s*gpt|\bgpt\b|openai/.test(lower)) {
-    const tier = /\bpro\b/.test(lower) ? 'Pro' : /\bteam\b/.test(lower) ? 'Team' : 'Plus';
-    return withDuration(`GPT ${tier}`);
+    const tier = /\bpro\b/i.test(raw) ? ' Pro' : /\bteam\b/i.test(raw) ? ' Team' : /\bplus\b/i.test(raw) ? ' Plus' : '';
+    return withDuration(`GPT${tier}`);
   }
-  if (/gmail|google mail/.test(lower)) return withDuration('Gmail New');
+  if (/gmail|google mail/.test(lower)) return withDuration('Gmail');
   if (/youtube/.test(lower)) return withDuration('YouTube');
-  if (/apple\s*id/.test(lower)) return 'Apple ID 2FA';
+  if (/apple\s*id/.test(lower)) return /\b2fa\b/i.test(raw) ? 'Apple ID 2FA' : 'Apple ID';
   if (/icloud/.test(lower)) return withDuration('iCloud');
   if (/\bgrok\b/.test(lower)) return withDuration('Grok');
   if (/vieon/.test(lower)) return withDuration('VieON VIP');
@@ -250,7 +260,9 @@ function compactProductName(product) {
 }
 
 function productGridLabel(product) {
-  return `${productEmoji(product)} ${compactProductName(product)}`;
+  const category = categoryOf(product);
+  const emoji = category.slug === 'other' ? productEmoji(product) : category.icon;
+  return `${emoji} ${compactProductName(product)}`;
 }
 
 async function showCategory(chatId, slug, runtime, page = 1) {
@@ -258,8 +270,8 @@ async function showCategory(chatId, slug, runtime, page = 1) {
   const group = categoryGroups(products).get(slug);
   if (!group || !group.products.length) return sendMessage(chatId, 'حالياً ما فيه منتجات بهالقسم.');
 
-  const configured = Number(runtime?.productsPageSize);
-  const wanted = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 20) : 8;
+  const configured = runtime?.productsPageSize != null ? Number(runtime.productsPageSize) : cfg.productsPageSize();
+  const wanted = Number.isInteger(configured) && configured > 0 ? Math.min(configured, 20) : Math.min(cfg.productsPageSize(), 20);
   const pageSize = Math.max(4, Math.ceil(wanted / 2) * 2);
   const totalPages = Math.max(1, Math.ceil(group.products.length / pageSize));
   const current = Math.min(Math.max(1, Number.parseInt(page, 10) || 1), totalPages);
@@ -333,31 +345,35 @@ async function askForAccount(chatId, key, total, index, accounts = []) {
 }
 
 async function startInputFlow(chatId, key, total, runtime) {
-  if (!livePurchases(runtime)) return sendMessage(chatId, 'الشراء مقفل مؤقتاً، تقدر تتصفح لين يرجع يشتغل.');
-  const product = await findProduct(key, runtime);
+  const [freshRuntime, product] = await Promise.all([
+    getRuntimeConfig({ fresh: true }),
+    findProduct(key, runtime, { fresh: true }),
+  ]);
+  if (!livePurchases(freshRuntime)) return sendMessage(chatId, 'الشراء مقفل مؤقتاً، تقدر تتصفح لين يرجع يشتغل.');
   if (!product) return sendMessage(chatId, 'الخدمة مو متوفرة حالياً.');
   if (!canPurchaseWithInput(product)) return sendMessage(chatId, 'متطلبات هالخدمة ما هي مدعومة تلقائياً حالياً.');
-  if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) return sendMessage(chatId, 'الخدمة خلصت حالياً.');
-  return askForAccount(chatId, key, Math.min(3, Math.max(1, Number(total) || 1)), 1, []);
+  const count = Math.min(3, Math.max(1, Number(total) || 1));
+  if (typeof product?.availability?.available === 'number' && product.availability.available < count) return sendMessage(chatId, '⛔ الكمية المطلوبة مو متوفرة حالياً.');
+  return askForAccount(chatId, key, count, 1, []);
 }
 
-function inputInvoicePayload(key, stars, email) {
-  const payload = `buyi:${key}:${stars}:${encodeURIComponent(email)}`;
+function inputInvoicePayload(key, stars, fingerprint, email) {
+  const payload = `buyi:${key}:${stars}:${fingerprint}:${encodeURIComponent(email)}`;
   return Buffer.byteLength(payload, 'utf8') <= 128 ? payload : null;
 }
 
-async function sendInputInvoice(chatId, user, key, runtime, email, index, total) {
-  const product = await findProduct(key, runtime);
+async function sendInputInvoice(chatId, key, freshRuntime, product, email, index, total) {
   if (!product || !canPurchaseWithInput(product)) return sendMessage(chatId, `❌ تعذر تجهيز فاتورة الحساب ${index}.`);
-  const stars = priceToStars(product.price, runtime);
+  if (!livePurchases(freshRuntime) || (typeof product?.availability?.available === 'number' && product.availability.available <= 0)) return sendMessage(chatId, `⛔ الحساب ${index} غير متوفر حالياً.`);
+  const stars = priceToStars(product.price, freshRuntime);
   if (!stars) return sendMessage(chatId, `❌ السعر غير متوفر للحساب ${index}.`);
-  const payload = inputInvoicePayload(product.key, stars, email);
+  const payload = inputInvoicePayload(product.key, stars, supplierPriceFingerprint(product), email);
   if (!payload) return sendMessage(chatId, `❌ بريد الحساب ${index} طويل أكثر من الحد المدعوم.`);
 
   return tg('sendInvoice', {
     chat_id: chatId,
     title: short(product.name, 32),
-    description: `الحساب ${index}/${total}: ${email}`.slice(0, 255),
+    description: `الحساب ${index}/${total}`,
     payload,
     currency: 'XTR',
     prices: [{ label: `الحساب ${index}`, amount: stars }],
@@ -365,8 +381,13 @@ async function sendInputInvoice(chatId, user, key, runtime, email, index, total)
 }
 
 async function handleAccountReply(message, runtime) {
+  if (!privatePurchaseChat(message.chat?.id, message.from?.id, message.chat?.type)) return false;
+  const origin = message.reply_to_message?.from;
+  const expectedBotId = cfg.telegramToken().split(':', 1)[0];
+  if (!origin?.is_bot || String(origin.id) !== expectedBotId) return false;
   const state = parseAccountPrompt(message.reply_to_message?.text);
   if (!state) return false;
+  if (state.index > state.total || state.accounts.length !== state.index - 1 || state.accounts.some(value => !validCustomerEmail(value))) return false;
 
   const email = String(message.text || '').trim();
   if (!validCustomerEmail(email)) {
@@ -386,8 +407,17 @@ async function handleAccountReply(message, runtime) {
     `✅ استلمت ${accounts.length} ${accounts.length === 1 ? 'حساب' : 'حسابات'}.\nكل حساب له فاتورة مستقلة لأن المورد ينفذ حساب واحد بكل طلب.`,
   );
 
+  const [freshRuntime, product] = await Promise.all([
+    getRuntimeConfig({ fresh: true }),
+    findProduct(state.key, runtime, { fresh: true }),
+  ]);
+  if (!product || !livePurchases(freshRuntime) || !canPurchaseWithInput(product) || (typeof product?.availability?.available === 'number' && product.availability.available < accounts.length)) {
+    await sendMessage(message.chat.id, '⛔ الحسابات المطلوبة مو متوفرة حالياً. افتح المنتج من جديد.');
+    return true;
+  }
+
   for (let i = 0; i < accounts.length; i += 1) {
-    await sendInputInvoice(message.chat.id, message.from, state.key, runtime, accounts[i], i + 1, accounts.length);
+    await sendInputInvoice(message.chat.id, state.key, freshRuntime, product, accounts[i], i + 1, accounts.length);
   }
   return true;
 }
@@ -406,7 +436,7 @@ async function showProduct(chatId, key, runtime) {
   const requirements = requirementSummary(product.purchaseRequirements);
 
   const lines = [
-    `${category.icon} ${short(product.name, 90)}`,
+    `${category.icon} ${String(product.name || 'منتج')}`,
     '',
   ];
 
@@ -430,26 +460,36 @@ async function showProduct(chatId, key, runtime) {
   }
   keyboard.inline_keyboard.push([{ text: `⬅️ ${category.label}`, callback_data: `cat:${category.slug}` }]);
 
-  return sendMessage(chatId, lines.join('\n'), { reply_markup: keyboard });
+  const text = lines.join('\n');
+  if (text.length <= 3800) return sendMessage(chatId, text, { reply_markup: keyboard });
+  await sendLongMessage(chatId, text);
+  return sendMessage(chatId, 'اختر الإجراء:', { reply_markup: keyboard });
 }
 
 async function startInvoice(chatId, user, key, runtime) {
-  if (!livePurchases(runtime)) return sendMessage(chatId, 'الشراء مقفل مؤقتاً، تقدر تتصفح لين يرجع يشتغل.');
-  const product = await findProduct(key, runtime);
+  const [freshRuntime, product] = await Promise.all([
+    getRuntimeConfig({ fresh: true }),
+    findProduct(key, runtime, { fresh: true }),
+  ]);
+  if (!livePurchases(freshRuntime)) return sendMessage(chatId, 'الشراء مقفل مؤقتاً، تقدر تتصفح لين يرجع يشتغل.');
   if (!product) return sendMessage(chatId, 'الخدمة مو متوفرة حالياً.');
   if (!canAutoPurchase(product)) return sendMessage(chatId, 'هالخدمة تحتاج بيانات إضافية قبل التنفيذ.');
-  if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) return sendMessage(chatId, 'الخدمة خلصت حالياً.');
-  const stars = priceToStars(product.price, runtime);
+  if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) return sendMessage(chatId, '⛔ غير متوفر حالياً');
+  const stars = priceToStars(product.price, freshRuntime);
   if (!stars) return sendMessage(chatId, 'السعر مو متوفر حالياً.');
 
   return tg('sendInvoice', {
     chat_id: chatId,
     title: short(product.name, 32),
     description: 'خدمة رقمية جاهزة — الدفع آمن عن طريق Telegram Stars.',
-    payload: `buy:${product.key}:${stars}`,
+    payload: `buy:${product.key}:${stars}:${supplierPriceFingerprint(product)}`,
     currency: 'XTR',
     prices: [{ label: 'الخدمة', amount: stars }],
   });
+}
+
+function privatePurchaseChat(chatId, userId, chatType) {
+  return chatType === 'private' && String(chatId) === String(userId);
 }
 
 function parseInvoicePayload(payload) {
@@ -458,66 +498,292 @@ function parseInvoicePayload(payload) {
   const key = parts[1] || '';
   const charged = Number(parts[2]);
   let customerEmail = '';
-  if (kind === 'buyi' && parts[3]) {
+  let priceFingerprint = '';
+  if (kind === 'buyi' && parts[4]) {
+    priceFingerprint = parts[3];
+    try { customerEmail = decodeURIComponent(parts.slice(4).join(':')); } catch { customerEmail = ''; }
+  } else if (kind === 'buyi' && parts[3]) {
     try { customerEmail = decodeURIComponent(parts.slice(3).join(':')); } catch { customerEmail = ''; }
+  } else if (kind === 'buy' && parts[3]) {
+    priceFingerprint = parts[3];
   }
-  return { kind, key, charged, customerEmail };
+  return { kind, key, charged, customerEmail, priceFingerprint };
 }
 
-async function validateCheckout(query, runtime) {
+async function validateCheckout(query) {
+  let payload;
   try {
-    const payload = parseInvoicePayload(query.invoice_payload);
-    if (!['buy', 'buyi'].includes(payload.kind)) throw new Error('طلب غير صالح');
-    const product = await findProduct(payload.key, runtime);
-    if (!product) throw new Error('الخدمة مو متوفرة');
-    if (payload.kind === 'buy' && !canAutoPurchase(product)) throw new Error('الخدمة تحتاج بيانات إضافية');
-    if (payload.kind === 'buyi' && (!canPurchaseWithInput(product) || !validCustomerEmail(payload.customerEmail))) throw new Error('بيانات الحساب غير صالحة');
-    if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) throw new Error('الخدمة نفدت');
+    payload = parseInvoicePayload(query.invoice_payload);
+    if (!['buy', 'buyi'].includes(payload.kind)) throw new Error('invalid');
+    if (!Number.isInteger(payload.charged) || payload.charged < 1 || query.total_amount !== payload.charged || query.currency !== 'XTR') throw new Error('invalid');
+    const [runtime, product] = await Promise.all([
+      getRuntimeConfig({ fresh: true }),
+      findProduct(payload.key, null, { fresh: true }),
+    ]);
+    if (!livePurchases(runtime)) throw new Error('closed');
+    if (!product) throw new Error('changed');
+    if (payload.kind === 'buy' && !canAutoPurchase(product)) throw new Error('changed');
+    if (payload.kind === 'buyi' && (!canPurchaseWithInput(product) || !validCustomerEmail(payload.customerEmail))) throw new Error('changed');
+    if (typeof product?.availability?.available === 'number' && product.availability.available <= 0) throw new Error('changed');
     const expected = priceToStars(product.price, runtime);
-    if (!expected || expected !== payload.charged || query.total_amount !== payload.charged || query.currency !== 'XTR') throw new Error('السعر تغيّر، افتح الخدمة من جديد');
-    await tg('answerPreCheckoutQuery', { pre_checkout_query_id: query.id, ok: true });
+    if (!expected || expected !== payload.charged || query.total_amount !== payload.charged || query.currency !== 'XTR' || (payload.priceFingerprint && payload.priceFingerprint !== supplierPriceFingerprint(product))) throw new Error('changed');
+    await tg('answerPreCheckoutQuery', { pre_checkout_query_id: query.id, ok: true }, { timeoutMs: 2000 });
   } catch (error) {
-    await tg('answerPreCheckoutQuery', { pre_checkout_query_id: query.id, ok: false, error_message: `ما قدرنا نكمل الطلب: ${error.message}`.slice(0, 200) });
+    const invalid = error.message === 'invalid';
+    await tg('answerPreCheckoutQuery', { pre_checkout_query_id: query.id, ok: false, error_message: invalid ? 'بيانات الفاتورة غير صالحة.' : 'السعر أو التوفر تغيّر. افتح المنتج من جديد.' }, { timeoutMs: 2000 });
   }
 }
 
-async function deliverPaidOrder(message, runtime) {
-  const payment = message.successful_payment;
-  const user = message.from;
-  const chatId = message.chat.id;
-  const payload = parseInvoicePayload(payment.invoice_payload);
+const paidCharges = new Map();
 
-  try {
-    if (!['buy', 'buyi'].includes(payload.kind)) throw new Error('بيانات الدفع غير صالحة');
-    const product = await findProduct(payload.key, runtime);
-    if (!product) throw new Error('الخدمة اختفت من المورد');
-    if (payload.kind === 'buy' && !canAutoPurchase(product)) throw new Error('الخدمة تحتاج بيانات إضافية');
-    if (payload.kind === 'buyi' && (!canPurchaseWithInput(product) || !validCustomerEmail(payload.customerEmail))) throw new Error('بيانات الحساب غير صالحة');
-    const expected = priceToStars(product.price, runtime);
-    if (!expected || expected !== payload.charged || payment.total_amount !== payload.charged || payment.currency !== 'XTR') throw new Error('السعر تغيّر بعد الدفع');
+function paymentIdempotencyKey(chargeId) {
+  const candidate = `tg-charge-${chargeId}`;
+  return Buffer.byteLength(candidate, 'utf8') <= 128
+    ? candidate
+    : `tg-charge-${crypto.createHash('sha256').update(String(chargeId)).digest('hex')}`;
+}
 
-    await sendMessage(chatId, '✅ وصل الدفع، جاري تجهيز طلبك...');
-    const inputs = payload.kind === 'buyi' ? { customerEmail: payload.customerEmail } : {};
-    const result = await purchaseProduct(product, user, `tg-charge-${payment.telegram_payment_charge_id}`, inputs);
-    await sendLongMessage(chatId, `✅ تم طلبك بنجاح.${payload.customerEmail ? `\nالحساب: ${payload.customerEmail}` : ''}\n\n${JSON.stringify(result, null, 2)}`);
+function safeErrorSummary(error) {
+  if (Number.isInteger(error?.status) && error.status > 0) {
+    const code = typeof error?.code === 'string' && /^[a-z_]{1,48}$/i.test(error.code)
+      ? error.code
+      : Number.isInteger(error?.code) && error.code > 0 ? String(error.code) : '';
+    return `HTTP ${error.status}${code ? ` / ${code}` : ''}`;
+  }
+  return error?.name || 'Error';
+}
 
-    const adminId = cfg.adminId();
-    if (adminId) await sendMessage(adminId, `✅ طلب ناجح\nالمستخدم: ${user.id}${user.username ? ` @${user.username}` : ''}\nالمنتج: ${product.name}${payload.customerEmail ? `\nالحساب: ${payload.customerEmail}` : ''}\nالمدفوع: ${payload.charged} ⭐`);
-  } catch (error) {
-    try {
-      await tg('refundStarPayment', { user_id: user.id, telegram_payment_charge_id: payment.telegram_payment_charge_id });
-      await sendMessage(chatId, `❌ ما قدرنا ننفذ الطلب، ورجعنا لك ${payment.total_amount} نجمة تلقائياً.`);
-    } catch (refundError) {
-      await sendMessage(chatId, '⚠️ صار خلل بالتنفيذ والاسترجاع الآلي. رفعنا الحالة للإدارة.');
-      const adminId = cfg.adminId();
-      if (adminId) await sendLongMessage(adminId, `🚨 فشل طلب + فشل Refund\nUser: ${user.id}\nCharge: ${payment.telegram_payment_charge_id}\nPurchase error: ${error.message}\nRefund error: ${refundError.message}`);
+function formatSupplierDelivery(result) {
+  const lines = [];
+  const order = result?.order;
+  if (order && typeof order === 'object') {
+    const label = order.productName || order.product_name || 'الطلب';
+    lines.push(`📦 ${label}`);
+    for (const key of ['orderCode', 'status', 'quantity', 'finalQuantity', 'slotMonths', 'fulfillmentStatus']) {
+      const value = order[key];
+      if (value != null && value !== '') lines.push(`${key}: ${String(value)}`);
     }
+  }
+  const delivery = result?.delivery;
+  const walk = (value, path = []) => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      for (const [index, item] of value.entries()) walk(item, [...path, String(index + 1)]);
+    } else if (typeof value === 'object') {
+      for (const [key, child] of Object.entries(value)) {
+        if (/^(?:api.?key|buyer.?key|token|balance)$/i.test(key)) continue;
+        walk(child, [...path, key]);
+      }
+    } else if (String(value).trim()) {
+      const key = path.join(' › ').replace(/[_-]+/g, ' ');
+      lines.push(`${key ? `${key}: ` : ''}${String(value)}`);
+    }
+  };
+  walk(delivery);
+  if (lines.length <= (order ? 1 : 0)) {
+    const sanitize = value => {
+      if (Array.isArray(value)) return value.map(sanitize);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value)
+        .filter(([key]) => !/^(?:api.?key|buyer.?key|token|balance|payment|key)$/i.test(key))
+        .map(([key, child]) => [key, sanitize(child)]));
+    };
+    const safe = sanitize(result);
+    lines.push(JSON.stringify(safe, null, 2));
+  }
+  return lines.join('\n');
+}
+
+async function notifyPaidSuccess(record, message, payment, payload) {
+  const chatId = message.chat.id;
+  const product = record.product;
+  const result = record.result;
+  const customerEmail = payload.customerEmail;
+  const content = `✅ تم طلبك بنجاح${customerEmail ? `\nالحساب: ${customerEmail}` : ''}\n\n${formatSupplierDelivery(result)}`;
+  if (!record.customerNotified) {
+    try {
+      await sendLongMessage(chatId, content);
+      record.customerNotified = true;
+    } catch (error) {
+      console.warn('customer_delivery_message_failed', error?.name || 'Error');
+      return false;
+    }
+  }
+  const adminId = cfg.adminId();
+  if (adminId && !record.adminNotified) {
+    try {
+      await sendMessage(adminId, `✅ طلب ناجح\nالمستخدم: ${message.from.id}\nالمنتج: ${short(product.name, 80)}\nالمدفوع: ${payment.total_amount} ⭐`);
+      record.adminNotified = true;
+    } catch (error) {
+      console.warn('admin_order_notice_failed', error?.name || 'Error');
+    }
+  }
+  return record.customerNotified === true;
+}
+
+async function alertForReconciliation(record, message, payment, productName, reason) {
+  const adminId = cfg.adminId();
+  record.reconciliationNotice ||= { admin: false, customer: false };
+  if (adminId && !record.reconciliationNotice.admin) {
+    try {
+      await sendMessage(adminId, `🚨 طلب يحتاج مراجعة\nالمستخدم: ${message.from.id}\nCharge: ${payment.telegram_payment_charge_id}\nالمنتج: ${short(productName || 'غير معروف', 80)}\nالسبب: ${reason}`);
+      record.reconciliationNotice.admin = true;
+    } catch (error) {
+      console.warn('admin_reconciliation_alert_failed', error?.name || 'Error');
+    }
+  }
+  if (!record.reconciliationNotice.customer) {
+    try {
+      await sendMessage(message.chat.id, 'وصل دفعك، والطلب يحتاج مراجعة. بنراجع الحالة ونتواصل معك.');
+      record.reconciliationNotice.customer = true;
+    } catch (error) { console.warn('customer_reconciliation_notice_failed', error?.name || 'Error'); }
+  }
+  return Boolean(adminId && record.reconciliationNotice.admin && record.reconciliationNotice.customer);
+}
+
+async function sendRefundNotices(record) {
+  const notice = record.refundNotice;
+  if (!notice) return true;
+  if (notice.mode === 'refunded') {
+    if (!notice.customer) {
+      try {
+        await sendMessage(notice.message.chat.id, `❌ ما قدرنا ننفذ الطلب، ورجعنا لك ${notice.payment.total_amount} نجمة تلقائياً.`);
+        notice.customer = true;
+      } catch (error) { console.warn('refund_customer_notice_failed', error?.name || 'Error'); }
+    }
+    return notice.customer;
+  }
+
+  if (!notice.customer) {
+    try {
+      await sendMessage(notice.message.chat.id, '⚠️ تعذر تنفيذ الطلب والاسترجاع الآلي. رفعنا الحالة للإدارة.');
+      notice.customer = true;
+    } catch (error) { console.warn('refund_failure_customer_notice_failed', error?.name || 'Error'); }
+  }
+  const adminId = cfg.adminId();
+  if (adminId && !notice.admin) {
+    try {
+      await sendMessage(adminId, `🚨 فشل الطلب والاسترجاع\nالمستخدم: ${notice.message.from.id}\nCharge: ${notice.payment.telegram_payment_charge_id}\nالمنتج: ${short(notice.productName || 'غير معروف', 80)}\nخطأ التنفيذ: ${notice.reason}\nخطأ الاسترجاع: ${notice.refundError}`);
+      notice.admin = true;
+    } catch (error) { console.warn('admin_refund_alert_failed', error?.name || 'Error'); }
+  }
+  return Boolean(adminId && notice.admin && notice.customer);
+}
+
+async function refundDefinitiveFailure(record, message, payment, productName, reason) {
+  try {
+    await tg('refundStarPayment', { user_id: message.from.id, telegram_payment_charge_id: payment.telegram_payment_charge_id });
+    record.status = 'refunded';
+    record.refundNotice = { mode: 'refunded', message, payment, customer: false };
+  } catch (refundError) {
+    record.status = 'reconciled';
+    record.refundNotice = { mode: 'failed', message, payment, productName, reason, refundError: safeErrorSummary(refundError), customer: false, admin: false };
+  }
+  const sent = await sendRefundNotices(record);
+  if (!sent) throw new Error('refund_notice_retry');
+  return record.status === 'refunded';
+}
+
+async function flagForReview(record, message, payment, productName, reason) {
+  record.status = 'reconciled';
+  record.review = { message, payment, productName, reason };
+  const sent = await alertForReconciliation(record, message, payment, productName, reason);
+  if (!sent) throw new Error('reconciliation_notice_retry');
+}
+
+async function processPaidOrder(record, message) {
+  const payment = message.successful_payment;
+  const payload = parseInvoicePayload(payment.invoice_payload);
+  const chargeId = String(payment.telegram_payment_charge_id || '');
+  const productName = 'غير معروف';
+  const fixedReason = 'invalid_paid_invoice';
+  if (!chargeId || !privatePurchaseChat(message.chat?.id, message.from?.id, message.chat?.type) || !['buy', 'buyi'].includes(payload.kind) || !Number.isInteger(payload.charged) || payload.charged < 1 || payment.total_amount !== payload.charged || payment.currency !== 'XTR') {
+    record.reason = fixedReason;
+    await refundDefinitiveFailure(record, message, payment, productName, fixedReason);
+    return;
+  }
+
+  let product;
+  let freshRuntime;
+  try {
+    [freshRuntime, product] = await Promise.all([
+      getRuntimeConfig({ fresh: true }),
+      findProduct(payload.key, null, { fresh: true }),
+    ]);
+  } catch {
+    return flagForReview(record, message, payment, productName, 'fresh_supplier_validation_failed');
+  }
+  if (!product || (payload.kind === 'buy' && !canAutoPurchase(product)) || (payload.kind === 'buyi' && (!canPurchaseWithInput(product) || !validCustomerEmail(payload.customerEmail))) || (typeof product?.availability?.available === 'number' && product.availability.available <= 0) || priceToStars(product.price, freshRuntime) !== payload.charged || (payload.priceFingerprint && payload.priceFingerprint !== supplierPriceFingerprint(product))) {
+    return flagForReview(record, message, payment, product?.name || productName, 'paid_order_current_product_changed');
+  }
+
+  record.product = product;
+  const inputs = payload.kind === 'buyi' ? { customerEmail: payload.customerEmail } : {};
+  let result;
+  try {
+    result = await purchaseProduct(product, message.from, paymentIdempotencyKey(chargeId), inputs);
+    if (result?.success === false) {
+      const error = new Error('supplier_rejected');
+      error.definitive = true;
+      throw error;
+    }
+  } catch (error) {
+    const reason = error?.status ? `${error?.code || 'supplier_error'}_${error.status}` : (error?.code || 'supplier_purchase_failed');
+    if (error?.definitive) {
+      record.reason = reason;
+      await refundDefinitiveFailure(record, message, payment, product.name, reason);
+      return;
+    }
+    return flagForReview(record, message, payment, product.name, `supplier_outcome_ambiguous${error?.status ? `_http_${error.status}` : ''}`);
+  }
+
+  record.status = 'fulfilled';
+  record.result = result;
+  const notified = await notifyPaidSuccess(record, message, payment, payload);
+  if (!notified) throw new Error('post_payment_delivery_retry');
+}
+
+async function deliverPaidOrder(message) {
+  const payment = message.successful_payment;
+  const chargeId = String(payment.telegram_payment_charge_id || '');
+  let record = chargeId ? paidCharges.get(chargeId) : null;
+  if (record?.promise) return record.promise;
+  if (record) {
+    let retry;
+    if (record.status === 'fulfilled') {
+      retry = async () => {
+        const notified = await notifyPaidSuccess(record, message, payment, parseInvoicePayload(payment.invoice_payload));
+        if (!notified) throw new Error('post_payment_delivery_retry');
+      };
+    } else if (record.refundNotice) {
+      retry = async () => {
+        if (!await sendRefundNotices(record)) throw new Error('refund_notice_retry');
+      };
+    } else if (record.review) {
+      retry = async () => {
+        const { message: original, payment: originalPayment, productName, reason } = record.review;
+        if (!await alertForReconciliation(record, original, originalPayment, productName, reason)) throw new Error('reconciliation_notice_retry');
+      };
+    }
+    if (!retry) return;
+    record.promise = retry();
+    try { await record.promise; }
+    finally { record.promise = null; }
+    return;
+  }
+  record = { status: 'processing', promise: null };
+  if (chargeId) paidCharges.set(chargeId, record);
+  record.promise = processPaidOrder(record, message);
+  try { await record.promise; }
+  finally {
+    record.promise = null;
+    if (paidCharges.size > 250) paidCharges.delete(paidCharges.keys().next().value);
   }
 }
 
 async function resetMenuButton() {
   try { await tg('setChatMenuButton', { menu_button: { type: 'default' } }); }
-  catch (error) { console.warn('menu_reset_failed', error.message); }
+  catch (error) { console.warn('menu_reset_failed', error?.name || 'Error'); }
 }
 
 export default async function handler(req, res) {
@@ -526,14 +792,15 @@ export default async function handler(req, res) {
   if (secret !== cfg.webhookSecret()) return res.status(401).json({ ok: false });
 
   try {
-    const runtime = await getRuntimeConfig();
     const update = req.body || {};
 
     if (update.pre_checkout_query) {
-      await validateCheckout(update.pre_checkout_query, runtime);
+      await validateCheckout(update.pre_checkout_query);
     } else if (update.message?.successful_payment) {
-      await deliverPaidOrder(update.message, runtime);
-    } else if (update.message) {
+      await deliverPaidOrder(update.message);
+    } else {
+      const runtime = await getRuntimeConfig();
+      if (update.message) {
       const rawText = String(update.message.text || '').trim();
       const text = rawText.toLowerCase();
       if (await handleAccountReply(update.message, runtime)) {
@@ -541,41 +808,46 @@ export default async function handler(req, res) {
       } else if (text === '/start') {
         await resetMenuButton();
         await showNativeHome(update.message.chat.id, runtime);
-      } else if (text === '/products' || text === '🛍 products' || text === 'المنتجات') {
+      } else if (text === '/products' || text === '🛍 products' || text === 'products' || text === '🛍 المنتجات' || text === 'المنتجات') {
         await showCategories(update.message.chat.id, runtime);
-      } else if (text === '/help' || text === '💬 support') {
+      } else if (text === '/help' || text === '💬 support' || text === 'support' || text === '💬 الدعم' || text === 'الدعم') {
         await sendMessage(update.message.chat.id, runtime?.helpMessage || 'اختر قسم، افتح المنتج، وإذا ناسبك اضغط شراء ⭐');
-      } else if (text === '👛 wallet') {
+      } else if (text === '👛 wallet' || text === 'wallet' || text === '👛 المحفظة' || text === 'المحفظة') {
         await sendMessage(update.message.chat.id, '👛 المحفظة\nالدفع داخل المتجر يتم عن طريق Telegram Stars ⭐');
       } else if (text === '🔗 api') {
         await sendMessage(update.message.chat.id, '🔗 API\nإذا تحتاج API أو ربط خاص، تواصل مع الدعم.');
-      } else if (text === '🛡 warranty') {
+      } else if (text === '🛡 warranty' || text === 'warranty' || text === '🛡 الضمان' || text === 'الضمان') {
         await sendMessage(update.message.chat.id, '🛡 الضمان\nكل خدمة يوضح ضمانها داخل تفاصيلها قبل الشراء.');
       } else {
         await showNativeHome(update.message.chat.id, runtime);
       }
-    } else if (update.callback_query) {
-      const query = update.callback_query;
-      await answerCallbackQuery(query.id);
-      const data = String(query.data || '');
-      if (data === 'cats') await showCategories(query.message.chat.id, runtime);
-      else if (data.startsWith('cat:')) await showCategory(query.message.chat.id, data.slice(4), runtime);
-      else if (data.startsWith('catp:')) {
-        const rest = data.slice(5);
-        const i = rest.lastIndexOf(':');
-        await showCategory(query.message.chat.id, i < 0 ? rest : rest.slice(0, i), runtime, i < 0 ? 1 : rest.slice(i + 1));
-      }
-      else if (data.startsWith('p:')) await showProduct(query.message.chat.id, data.slice(2), runtime);
-      else if (data.startsWith('buy:')) await startInvoice(query.message.chat.id, query.from, data.slice(4), runtime);
-      else if (data.startsWith('form:')) {
-        const [, key, total] = data.split(':');
-        await startInputFlow(query.message.chat.id, key, total, runtime);
+      } else if (update.callback_query) {
+        const query = update.callback_query;
+        const data = String(query.data || '');
+        if ((data.startsWith('buy:') || data.startsWith('form:')) && !privatePurchaseChat(query.message?.chat?.id, query.from?.id, query.message?.chat?.type)) {
+          await answerCallbackQuery(query.id, 'الشراء متاح من المحادثة الخاصة مع البوت.');
+        } else {
+          await answerCallbackQuery(query.id);
+          if (data === 'cats') await showCategories(query.message.chat.id, runtime);
+          else if (data.startsWith('cat:')) await showCategory(query.message.chat.id, data.slice(4), runtime);
+          else if (data.startsWith('catp:')) {
+            const rest = data.slice(5);
+            const i = rest.lastIndexOf(':');
+            await showCategory(query.message.chat.id, i < 0 ? rest : rest.slice(0, i), runtime, i < 0 ? 1 : rest.slice(i + 1));
+          }
+          else if (data.startsWith('p:')) await showProduct(query.message.chat.id, data.slice(2), runtime);
+          else if (data.startsWith('buy:')) await startInvoice(query.message.chat.id, query.from, data.slice(4), runtime);
+          else if (data.startsWith('form:')) {
+            const [, key, total] = data.split(':');
+            await startInputFlow(query.message.chat.id, key, total, runtime);
+          }
+        }
       }
     }
 
     return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error(error);
+    console.error('telegram_webhook_error', safeErrorSummary(error));
     return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 }
